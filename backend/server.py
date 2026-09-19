@@ -79,6 +79,77 @@ def send_sms(to: str, body: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Email gateway (Emergent-managed Resend) with graceful MOCK fallback
+# ---------------------------------------------------------------------------
+import httpx
+from html import escape as _html_escape
+
+EMAIL_BASE_URL = "https://integrations.emergentagent.com"
+
+
+def email_configured() -> bool:
+    return bool(os.environ.get("EMERGENT_EMAIL_KEY"))
+
+
+def app_base_url() -> str:
+    return os.environ.get("APP_BASE_URL", "").rstrip("/")
+
+
+def booking_link(pid: str) -> str:
+    base = app_base_url()
+    return f"{base}/zapis/{pid}" if base else f"/zapis/{pid}"
+
+
+def _email_html(patient: dict, body_text: str, link: str, clinic: str) -> str:
+    safe_body = _html_escape(body_text).replace("\n", "<br>")
+    return (
+        '<table role="presentation" width="100%" style="background:#F9FAFB;padding:24px">'
+        '<tr><td align="center">'
+        '<table role="presentation" width="560" style="background:#FFFFFF;border-radius:12px;'
+        'border:1px solid #E5E7EB;font-family:Arial,Helvetica,sans-serif">'
+        '<tr><td style="background:#2D6A4F;border-radius:12px 12px 0 0;padding:20px 28px">'
+        f'<span style="color:#FFFFFF;font-size:18px;font-weight:bold">{_html_escape(clinic)}</span>'
+        '</td></tr>'
+        '<tr><td style="padding:28px">'
+        f'<p style="color:#1C1917;font-size:15px;line-height:1.6;margin:0 0 24px">{safe_body}</p>'
+        f'<a href="{link}" style="display:inline-block;background:#2D6A4F;color:#FFFFFF;'
+        'text-decoration:none;padding:12px 24px;border-radius:8px;font-size:15px;font-weight:bold">'
+        'Zarezerwuj wizytę</a>'
+        '</td></tr>'
+        '<tr><td style="padding:0 28px 24px">'
+        f'<p style="color:#888;font-size:12px;line-height:1.5;margin:16px 0 0">Wiadomość wysłana przez '
+        f'{_html_escape(clinic)} w ramach przypomnienia o wizycie kontrolnej. Nigdy nie prosimy '
+        'o hasło ani dane karty w wiadomości email.</p>'
+        '</td></tr></table></td></tr></table>'
+    )
+
+
+async def send_email_reminder(to: str, subject: str, html: str) -> dict:
+    """Send email via Emergent-managed proxy; MOCK when key absent or on failure."""
+    if not to:
+        return {"status": "BLAD", "mock": not email_configured(), "error": "brak adresu email"}
+    if not email_configured():
+        return {"status": "WYSLANO", "mock": True, "error": None}
+    payload = {"to": [to], "subject": subject, "html": html,
+               "from_name": os.environ.get("EMAIL_FROM_NAME", "RecallDent")}
+    reply_to = os.environ.get("EMAIL_REPLY_TO")
+    if reply_to:
+        payload["contact_email"] = reply_to
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                f"{EMAIL_BASE_URL}/api/v1/email/send",
+                headers={"X-Email-Key": os.environ["EMERGENT_EMAIL_KEY"]},
+                json=payload,
+            )
+        resp.raise_for_status()
+        return {"status": "WYSLANO", "mock": False, "error": None, "id": resp.json().get("id")}
+    except Exception as e:
+        logging.getLogger(__name__).error("Email send error: %s", e)
+        return {"status": "BLAD", "mock": False, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
 # Models
 # ---------------------------------------------------------------------------
 class Patient(BaseModel):
@@ -286,7 +357,9 @@ async def _send_reminder(patient: dict, channel: str = "SMS", historical: bool =
     templates = await db.templates.find_one({}) or DEFAULT_TEMPLATES
     procs = {p["nazwa"]: p for p in await db.procedures.find({}).to_list(100)}
     proc = procs.get(patient.get("typ_ostatniej_procedury"))
-    link = f"/zapis/{str(patient['_id'])}"
+    pid = str(patient["_id"])
+    link = booking_link(pid)
+    clinic = settings.get("nazwa_gabinetu", "")
     if channel == "EMAIL":
         tresc = render_template(templates.get("email", DEFAULT_TEMPLATES["email"]), patient, proc, settings, link)
     else:
@@ -294,12 +367,18 @@ async def _send_reminder(patient: dict, channel: str = "SMS", historical: bool =
 
     sent_at = now_utc() - timedelta(days=random.randint(0, 25)) if historical else now_utc()
 
-    # Dispatch: SMS goes through Twilio gateway (mock fallback); email stays MOCK.
-    if channel == "SMS" and not historical:
+    # Dispatch: SMS via Twilio gateway; EMAIL via Emergent Resend proxy (both mock-fallback).
+    if historical:
+        status, is_mock, err = "WYSLANO", True, None
+    elif channel == "SMS":
         res = send_sms(patient.get("telefon", ""), tresc)
         status, is_mock, err = res["status"], res["mock"], res.get("error")
     else:
-        status, is_mock, err = "WYSLANO", True, None
+        subject = render_template(templates.get("email_temat", DEFAULT_TEMPLATES["email_temat"]),
+                                  patient, proc, settings, link)
+        html = _email_html(patient, tresc, link, clinic)
+        res = await send_email_reminder(patient.get("email", ""), subject, html)
+        status, is_mock, err = res["status"], res["mock"], res.get("error")
 
     # Determine sequence step for this reminder
     if seq_step is None:
@@ -855,7 +934,48 @@ async def roi_pdf():
 async def sms_status():
     return {"skonfigurowane": twilio_configured(),
             "tryb": "REALNY" if twilio_configured() else "MOCK",
-            "provider": "Twilio"}
+            "provider": "Twilio",
+            "email_skonfigurowane": email_configured(),
+            "email_tryb": "REALNY" if email_configured() else "MOCK",
+            "email_provider": "Resend"}
+
+
+SEQ_STEP_LABEL = {
+    0: "Nie rozpoczęto",
+    1: "Wysłano SMS (krok 1)",
+    2: "Wysłano email (krok 2)",
+    3: "Wysłano SMS przypominający (krok 3 — koniec)",
+}
+
+
+@api_router.get("/patients/{pid}/timeline")
+async def patient_timeline(pid: str):
+    p = await db.patients.find_one({"_id": ObjectId(pid)})
+    if not p:
+        raise HTTPException(404, "Pacjent nie znaleziony")
+    reminders = await db.reminders.find({"pacjent_id": pid}).sort("data_wyslania", 1).to_list(200)
+    appts = await db.appointments.find({"pacjent_id": pid}).sort("utworzono", 1).to_list(200)
+
+    krok = p.get("sekwencja_krok", 0)
+    status = p.get("status_recallu")
+    next_step = None
+    last = p.get("data_ostatniego_przypomnienia")
+    if status == STATUS_REMINDED and krok in SEQ_GAP_DAYS and last:
+        try:
+            due = datetime.fromisoformat(last) + timedelta(days=SEQ_GAP_DAYS[krok])
+            next_typ = "EMAIL" if krok == 1 else "SMS"
+            next_step = {"typ": next_typ, "data": iso(due), "krok": krok + 1}
+        except Exception:
+            next_step = None
+
+    return {
+        "pacjent": clean(p),
+        "sekwencja_krok": krok,
+        "sekwencja_krok_opis": SEQ_STEP_LABEL.get(krok, ""),
+        "nastepny_krok": next_step,
+        "przypomnienia": [clean(r) for r in reminders],
+        "wizyty": [clean(a) for a in appts],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -882,6 +1002,46 @@ def generate_slots(settings: dict) -> List[dict]:
     return slots
 
 
+async def get_clinic_slots() -> List[dict]:
+    """Return clinic-defined upcoming free slots grouped by date, or [] if none set."""
+    today = now_utc().date().isoformat()
+    docs = await db.slots.find({"data": {"$gte": today}, "zajety": False}).sort([("data", 1), ("godzina", 1)]).to_list(500)
+    grouped: dict = {}
+    for d in docs:
+        grouped.setdefault(d["data"], []).append(d["godzina"])
+    return [{"data": k, "godziny": grouped[k]} for k in sorted(grouped.keys())]
+
+
+class SlotCreate(BaseModel):
+    data: str
+    godziny: List[str]
+
+
+@api_router.get("/slots")
+async def list_slots():
+    today = now_utc().date().isoformat()
+    docs = await db.slots.find({"data": {"$gte": today}}).sort([("data", 1), ("godzina", 1)]).to_list(500)
+    return [clean(d) for d in docs]
+
+
+@api_router.post("/slots")
+async def create_slots(payload: SlotCreate):
+    added = 0
+    for g in payload.godziny:
+        exists = await db.slots.find_one({"data": payload.data, "godzina": g})
+        if exists:
+            continue
+        await db.slots.insert_one({"data": payload.data, "godzina": g, "zajety": False, "pacjent_id": None})
+        added += 1
+    return {"added": added}
+
+
+@api_router.delete("/slots/{sid}")
+async def delete_slot(sid: str):
+    await db.slots.delete_one({"_id": ObjectId(sid)})
+    return {"ok": True}
+
+
 @api_router.get("/booking/{pid}")
 async def booking_info(pid: str):
     try:
@@ -894,13 +1054,16 @@ async def booking_info(pid: str):
     procs = {x["nazwa"]: x for x in await db.procedures.find({}).to_list(100)}
     proc = procs.get(p.get("typ_ostatniej_procedury"))
     existing = await db.appointments.find_one({"pacjent_id": pid, "status": "ZAPLANOWANA"})
+    clinic_slots = await get_clinic_slots()
+    sloty = clinic_slots if clinic_slots else generate_slots(settings)
     return {
         "pacjent": {"imie": p.get("imie"), "nazwisko": p.get("nazwisko")},
         "procedura": p.get("typ_ostatniej_procedury"),
         "interwal": interval_label(proc["interwal_miesiace"]) if proc else "6 miesięcy",
         "status": p.get("status_recallu"),
         "gabinet": clean(settings),
-        "sloty": generate_slots(settings),
+        "sloty": sloty,
+        "reczne_terminy": bool(clinic_slots),
         "istniejaca_wizyta": clean(existing) if existing else None,
     }
 
@@ -918,16 +1081,25 @@ async def booking_confirm(pid: str, payload: BookingConfirm):
     when = datetime.fromisoformat(f"{payload.data}T{payload.godzina}:00+00:00")
     appt = await _create_appointment(p, when=when, source="ONLINE")
     settings = await db.settings.find_one({}) or DEFAULT_SETTINGS
+    # mark clinic-defined slot as taken (if it exists)
+    await db.slots.update_one(
+        {"data": payload.data, "godzina": payload.godzina},
+        {"$set": {"zajety": True, "pacjent_id": pid}},
+    )
+    confirm_text = (f"Potwierdzenie: Twoja wizyta w {settings.get('nazwa_gabinetu','')} została "
+                    f"zarezerwowana na {payload.data} {payload.godzina}. Do zobaczenia!")
+    res = send_sms(p.get("telefon", ""), confirm_text)
     await db.reminders.insert_one({
         "pacjent_id": pid,
         "pacjent_imie": f"{p.get('imie','')} {p.get('nazwisko','')}",
         "typ": "SMS",
         "odbiorca": p.get("telefon"),
-        "tresc": f"Potwierdzenie: Twoja wizyta w {settings.get('nazwa_gabinetu','')} została zarezerwowana na {payload.data} {payload.godzina}. Do zobaczenia!",
-        "status": "WYSLANO",
-        "mock": True,
+        "tresc": confirm_text,
+        "status": res["status"],
+        "mock": res["mock"],
+        "blad": res.get("error"),
         "data_wyslania": iso(now_utc()),
-        "data_dostarczenia": iso(now_utc()),
+        "data_dostarczenia": iso(now_utc()) if res["status"] == "WYSLANO" else None,
     })
     return {"ok": True, "wizyta": clean(appt), "gabinet": clean(settings)}
 
@@ -947,7 +1119,7 @@ async def booking_reject(pid: str):
 # ---------------------------------------------------------------------------
 @api_router.post("/admin/reset-demo")
 async def reset_demo():
-    for c in ["patients", "procedures", "settings", "templates", "reminders", "appointments"]:
+    for c in ["patients", "procedures", "settings", "templates", "reminders", "appointments", "slots"]:
         await db[c].delete_many({})
     await seed_if_empty()
     return {"ok": True}

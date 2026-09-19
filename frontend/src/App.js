@@ -5,6 +5,7 @@ import ClinicLayout from "@/layouts/ClinicLayout";
 import Dashboard from "@/pages/Dashboard";
 import Patients from "@/pages/Patients";
 import ImportPage from "@/pages/ImportPage";
+import SlotsPage from "@/pages/SlotsPage";
 import RecallSettings from "@/pages/RecallSettings";
 import Templates from "@/pages/Templates";
 import RoiReport from "@/pages/RoiReport";
@@ -23,6 +24,7 @@ function App() {
             <Route path="/panel" element={<Dashboard />} />
             <Route path="/pacjenci" element={<Patients />} />
             <Route path="/import" element={<ImportPage />} />
+            <Route path="/terminy" element={<SlotsPage />} />
             <Route path="/ustawienia-recallu" element={<RecallSettings />} />
             <Route path="/szablony" element={<Templates />} />
             <Route path="/raport-roi" element={<RoiReport />} />

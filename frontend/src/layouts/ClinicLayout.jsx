@@ -2,7 +2,7 @@ import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useEffect, useState } from "react";
 import {
   LayoutDashboard, Users, Upload, Clock, MessageSquareText,
-  TrendingUp, Inbox, Settings, Stethoscope, Play, RotateCcw,
+  TrendingUp, Inbox, Settings, Stethoscope, Play, RotateCcw, CalendarClock,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
@@ -12,6 +12,7 @@ const NAV = [
   { to: "/panel", label: "Dashboard", icon: LayoutDashboard, id: "dashboard" },
   { to: "/pacjenci", label: "Lista pacjentów", icon: Users, id: "patients" },
   { to: "/import", label: "Import danych", icon: Upload, id: "import" },
+  { to: "/terminy", label: "Dostępne terminy", icon: CalendarClock, id: "slots" },
   { to: "/ustawienia-recallu", label: "Ustawienia recallu", icon: Clock, id: "recall" },
   { to: "/szablony", label: "Szablony wiadomości", icon: MessageSquareText, id: "templates" },
   { to: "/wiadomosci", label: "Wysłane wiadomości", icon: Inbox, id: "messages" },

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { PageHeader } from "@/components/Shared";
 import { Card } from "@/components/ui/card";
-import { Smartphone, Mail, CheckCheck, Info } from "lucide-react";
+import { Smartphone, Mail, CheckCheck } from "lucide-react";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
@@ -36,15 +36,18 @@ export default function Messages() {
       />
 
       {smsMode && (
-        <div data-testid="sms-mode-banner" className={`mb-4 rounded-xl border p-4 text-sm flex items-start gap-3 ${
-          smsMode.skonfigurowane ? "bg-emerald-50 border-emerald-200 text-emerald-800" : "bg-amber-50 border-amber-200 text-amber-800"
-        }`}>
-          <Info className="h-4 w-4 mt-0.5 shrink-0" />
-          <div>
-            <b>Bramka SMS: {smsMode.tryb}</b> ({smsMode.provider}).{" "}
-            {smsMode.skonfigurowane
-              ? "Wiadomości SMS są realnie wysyłane do pacjentów."
-              : "SMS działa w trybie symulacji — dodaj klucze Twilio (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER), aby wysyłać realne wiadomości. Email pozostaje w trybie MOCK."}
+        <div data-testid="sms-mode-banner" className="mb-4 grid sm:grid-cols-2 gap-3">
+          <div className={`rounded-xl border p-3 text-sm flex items-start gap-2.5 ${
+            smsMode.skonfigurowane ? "bg-emerald-50 border-emerald-200 text-emerald-800" : "bg-amber-50 border-amber-200 text-amber-800"
+          }`}>
+            <Smartphone className="h-4 w-4 mt-0.5 shrink-0" />
+            <div><b>SMS: {smsMode.tryb}</b> ({smsMode.provider}). {smsMode.skonfigurowane ? "Realna wysyłka SMS." : "Symulacja — dodaj klucze Twilio, aby wysyłać realne SMS."}</div>
+          </div>
+          <div className={`rounded-xl border p-3 text-sm flex items-start gap-2.5 ${
+            smsMode.email_skonfigurowane ? "bg-emerald-50 border-emerald-200 text-emerald-800" : "bg-amber-50 border-amber-200 text-amber-800"
+          }`}>
+            <Mail className="h-4 w-4 mt-0.5 shrink-0" />
+            <div><b>Email: {smsMode.email_tryb}</b> ({smsMode.email_provider}). {smsMode.email_skonfigurowane ? "Realna wysyłka email." : "Symulacja email."}</div>
           </div>
         </div>
       )}

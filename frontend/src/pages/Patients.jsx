@@ -19,7 +19,7 @@ import {
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { MoreHorizontal, Send, Mail, UserX, Pencil, Plus, Search, ExternalLink } from "lucide-react";
+import { MoreHorizontal, Send, Mail, UserX, Pencil, Plus, Search, ExternalLink, History, Smartphone, CheckCheck, Clock3 } from "lucide-react";
 import { toast } from "sonner";
 
 const STATUS_OPTS = ["WSZYSCY", ...Object.keys(STATUS_META)];
@@ -38,6 +38,8 @@ export default function Patients() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [form, setForm] = useState(emptyForm);
   const [editId, setEditId] = useState(null);
+  const [timeline, setTimeline] = useState(null);
+  const [timelineOpen, setTimelineOpen] = useState(false);
 
   const load = useCallback(() => {
     api.get("/patients", { params: { status, procedura: proc, search: search || undefined } })
@@ -101,6 +103,15 @@ export default function Patients() {
   };
 
   const openBooking = (id) => window.open(`/zapis/${id}`, "_blank");
+
+  const openTimeline = async (id) => {
+    setTimeline(null);
+    setTimelineOpen(true);
+    const r = await api.get(`/patients/${id}/timeline`);
+    setTimeline(r.data);
+  };
+
+  const fmtDT = (s) => (s ? s.slice(0, 16).replace("T", " ") : "—");
 
   return (
     <div data-testid="patients-page">
@@ -192,6 +203,9 @@ export default function Patients() {
                         <DropdownMenuItem onClick={() => openBooking(p.id)}>
                           <ExternalLink className="h-4 w-4 mr-2" /> Otwórz link zapisu
                         </DropdownMenuItem>
+                        <DropdownMenuItem data-testid={`timeline-${p.id}`} onClick={() => openTimeline(p.id)}>
+                          <History className="h-4 w-4 mr-2" /> Oś czasu sekwencji
+                        </DropdownMenuItem>
                         <DropdownMenuItem onClick={() => openEdit(p)}>
                           <Pencil className="h-4 w-4 mr-2" /> Edytuj dane
                         </DropdownMenuItem>
@@ -242,6 +256,70 @@ export default function Patients() {
             <Button variant="outline" onClick={() => setDialogOpen(false)}>Anuluj</Button>
             <Button data-testid="save-patient-btn" onClick={save}>Zapisz</Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={timelineOpen} onOpenChange={setTimelineOpen}>
+        <DialogContent className="max-w-lg" data-testid="timeline-dialog">
+          <DialogHeader>
+            <DialogTitle className="font-head">Oś czasu sekwencji przypomnień</DialogTitle>
+          </DialogHeader>
+          {!timeline ? (
+            <div className="py-8 text-center text-muted-foreground text-sm">Ładowanie...</div>
+          ) : (
+            <div>
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <div className="font-medium">{timeline.pacjent.imie} {timeline.pacjent.nazwisko}</div>
+                  <div className="text-sm text-muted-foreground">{timeline.sekwencja_krok_opis}</div>
+                </div>
+                <StatusBadge status={timeline.pacjent.status_recallu} />
+              </div>
+
+              {/* Step progress */}
+              <div className="flex items-center gap-1.5 mb-5">
+                {[1, 2, 3].map((s) => (
+                  <div key={s} className="flex-1">
+                    <div className={`h-1.5 rounded-full ${timeline.sekwencja_krok >= s ? "bg-primary" : "bg-secondary"}`} />
+                    <div className="text-[10px] text-muted-foreground mt-1 text-center">
+                      {s === 1 ? "SMS" : s === 2 ? "Email +3d" : "SMS +7d"}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {timeline.nastepny_krok && (
+                <div data-testid="next-step" className="flex items-center gap-2 text-sm p-3 rounded-lg bg-amber-50 text-amber-800 border border-amber-200 mb-4">
+                  <Clock3 className="h-4 w-4 shrink-0" />
+                  Następny krok: <b>{timeline.nastepny_krok.typ}</b> zaplanowany na {fmtDT(timeline.nastepny_krok.data)}
+                </div>
+              )}
+
+              <div className="space-y-3 max-h-72 overflow-y-auto">
+                {timeline.przypomnienia.length === 0 && (
+                  <div className="text-sm text-muted-foreground text-center py-6">Brak wysłanych przypomnień</div>
+                )}
+                {timeline.przypomnienia.map((r) => (
+                  <div key={r.id} className="flex gap-3">
+                    <div className={`h-8 w-8 rounded-lg flex items-center justify-center shrink-0 ${r.typ === "SMS" ? "bg-sky-50 text-sky-600" : "bg-violet-50 text-violet-600"}`}>
+                      {r.typ === "SMS" ? <Smartphone className="h-4 w-4" /> : <Mail className="h-4 w-4" />}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-sm font-medium">{r.typ}</span>
+                        {r.krok_sekwencji && <span className="text-[10px] px-1.5 py-0.5 rounded bg-secondary">krok {r.krok_sekwencji}</span>}
+                        {r.mock && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700">MOCK</span>}
+                        <span className={`text-[10px] flex items-center gap-1 ${r.status === "WYSLANO" ? "text-emerald-600" : "text-rose-600"}`}>
+                          <CheckCheck className="h-3 w-3" /> {r.status}
+                        </span>
+                      </div>
+                      <div className="text-xs text-muted-foreground">{fmtDT(r.data_wyslania)}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </DialogContent>
       </Dialog>
     </div>
