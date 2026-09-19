@@ -1,4 +1,5 @@
-from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File
+from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Header, BackgroundTasks
+from fastapi.responses import Response
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -6,6 +7,7 @@ import os
 import io
 import csv
 import re
+import hmac
 import logging
 import random
 from pathlib import Path
@@ -43,6 +45,38 @@ STATUS_REJECTED = "ODRZUCONY"
 PHONE_RE = re.compile(r"^\+?[0-9\s\-]{9,15}$")
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
+# Sequence steps: 0 = not started, 1 = initial SMS sent, 2 = follow-up email sent,
+# 3 = final SMS reminder sent (sequence finished)
+SEQ_GAP_DAYS = {1: 3, 2: 7}  # after step1 wait 3 days -> email; after step2 wait 7 days -> final SMS
+
+
+# ---------------------------------------------------------------------------
+# SMS gateway (Twilio) with graceful MOCK fallback
+# ---------------------------------------------------------------------------
+def twilio_configured() -> bool:
+    return all(os.environ.get(k) for k in ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_PHONE_NUMBER"))
+
+
+def send_sms(to: str, body: str) -> dict:
+    """Send an SMS via Twilio if configured, else return a MOCK result.
+    Returns dict: {status, mock, error}."""
+    if not to:
+        return {"status": "BLAD", "mock": not twilio_configured(), "error": "brak numeru"}
+    if not twilio_configured():
+        return {"status": "WYSLANO", "mock": True, "error": None}
+    try:
+        from twilio.rest import Client
+        client = Client(os.environ["TWILIO_ACCOUNT_SID"], os.environ["TWILIO_AUTH_TOKEN"])
+        msg = client.messages.create(
+            from_=os.environ["TWILIO_PHONE_NUMBER"],
+            to=to.replace(" ", ""),
+            body=body,
+        )
+        return {"status": "WYSLANO", "mock": False, "error": None, "sid": msg.sid}
+    except Exception as e:
+        logging.getLogger(__name__).error("Twilio send error: %s", e)
+        return {"status": "BLAD", "mock": False, "error": str(e)}
+
 
 # ---------------------------------------------------------------------------
 # Models
@@ -56,6 +90,7 @@ class Patient(BaseModel):
     typ_ostatniej_procedury: str = ""
     status_recallu: str = STATUS_ACTIVE
     data_ostatniego_przypomnienia: Optional[str] = None
+    sekwencja_krok: int = 0
     zgoda_sms: bool = True
     zgoda_email: bool = True
     wykluczony: bool = False
@@ -245,7 +280,7 @@ def render_template(tpl: str, patient: dict, proc: Optional[dict], settings: dic
             .replace("{nazwa_gabinetu}", settings.get("nazwa_gabinetu", "")))
 
 
-async def _send_reminder(patient: dict, channel: str = "SMS", historical: bool = False):
+async def _send_reminder(patient: dict, channel: str = "SMS", historical: bool = False, seq_step: Optional[int] = None):
     settings = await db.settings.find_one({}) or DEFAULT_SETTINGS
     templates = await db.templates.find_one({}) or DEFAULT_TEMPLATES
     procs = {p["nazwa"]: p for p in await db.procedures.find({}).to_list(100)}
@@ -258,16 +293,29 @@ async def _send_reminder(patient: dict, channel: str = "SMS", historical: bool =
 
     sent_at = now_utc() - timedelta(days=random.randint(0, 25)) if historical else now_utc()
 
+    # Dispatch: SMS goes through Twilio gateway (mock fallback); email stays MOCK.
+    if channel == "SMS" and not historical:
+        res = send_sms(patient.get("telefon", ""), tresc)
+        status, is_mock, err = res["status"], res["mock"], res.get("error")
+    else:
+        status, is_mock, err = "WYSLANO", True, None
+
+    # Determine sequence step for this reminder
+    if seq_step is None:
+        seq_step = 2 if channel == "EMAIL" else 1
+
     reminder = {
         "pacjent_id": str(patient["_id"]),
         "pacjent_imie": f"{patient.get('imie','')} {patient.get('nazwisko','')}",
         "typ": channel,
         "odbiorca": patient.get("telefon") if channel == "SMS" else patient.get("email"),
         "tresc": tresc,
-        "status": "WYSLANO",
-        "mock": True,
+        "status": status,
+        "mock": is_mock,
+        "blad": err,
+        "krok_sekwencji": seq_step,
         "data_wyslania": iso(sent_at),
-        "data_dostarczenia": iso(sent_at + timedelta(seconds=5)),
+        "data_dostarczenia": iso(sent_at + timedelta(seconds=5)) if status == "WYSLANO" else None,
     }
     await db.reminders.insert_one(reminder)
     await db.patients.update_one(
@@ -275,6 +323,7 @@ async def _send_reminder(patient: dict, channel: str = "SMS", historical: bool =
         {"$set": {
             "status_recallu": STATUS_REMINDED,
             "data_ostatniego_przypomnienia": iso(sent_at),
+            "sekwencja_krok": seq_step,
             "zaktualizowano": iso(now_utc()),
         }},
     )
@@ -298,6 +347,66 @@ async def _create_appointment(patient: dict, when: datetime, historical: bool = 
         {"$set": {"status_recallu": STATUS_BOOKED, "zaktualizowano": iso(now_utc())}},
     )
     return appt
+
+
+async def advance_sequences() -> dict:
+    """Advance the multi-channel reminder sequence for patients awaiting a reaction.
+    Step flow: DO_PRZYPOMNIENIA -> SMS (step1) -> +3d email (step2) -> +7d SMS (step3, end).
+    Booked / rejected patients are skipped (they reacted)."""
+    result = {"nowe_sms": 0, "email": 0, "final_sms": 0}
+    today = now_utc()
+
+    # Step 1: newly due patients get the initial SMS
+    async for p in db.patients.find({"status_recallu": STATUS_DUE, "wykluczony": False}):
+        if p.get("zgoda_sms"):
+            await _send_reminder(p, channel="SMS", seq_step=1)
+            result["nowe_sms"] += 1
+        else:
+            # no SMS consent: try starting with email if allowed
+            if p.get("zgoda_email"):
+                await _send_reminder(p, channel="EMAIL", seq_step=2)
+                result["email"] += 1
+
+    # Follow-up steps for patients still in PRZYPOMNIANY (no booking/rejection yet)
+    async for p in db.patients.find({"status_recallu": STATUS_REMINDED, "wykluczony": False}):
+        krok = p.get("sekwencja_krok", 1)
+        last = p.get("data_ostatniego_przypomnienia")
+        if not last or krok >= 3:
+            continue
+        try:
+            last_dt = datetime.fromisoformat(last)
+        except Exception:
+            continue
+        gap = SEQ_GAP_DAYS.get(krok)
+        if gap is None:
+            continue
+        if (today - last_dt).days < gap:
+            continue
+        if krok == 1:
+            # move to email follow-up
+            if p.get("zgoda_email"):
+                await _send_reminder(p, channel="EMAIL", seq_step=2)
+                result["email"] += 1
+            else:
+                # skip email, go straight to final SMS
+                if p.get("zgoda_sms"):
+                    await _send_reminder(p, channel="SMS", seq_step=3)
+                    result["final_sms"] += 1
+        elif krok == 2:
+            # final SMS reminder
+            if p.get("zgoda_sms"):
+                await _send_reminder(p, channel="SMS", seq_step=3)
+                result["final_sms"] += 1
+            else:
+                await db.patients.update_one({"_id": p["_id"]}, {"$set": {"sekwencja_krok": 3}})
+    return result
+
+
+async def run_daily_recall() -> dict:
+    """Full nightly job: scan for overdue patients, then advance the reminder sequence."""
+    marked = await run_recall_scan()
+    seq = await advance_sequences()
+    return {"marked_due": marked, **seq}
 
 
 # ---------------------------------------------------------------------------
@@ -588,8 +697,28 @@ async def list_reminders(typ: Optional[str] = None):
 
 @api_router.post("/recall/run")
 async def recall_run():
-    marked = await run_recall_scan()
-    return {"marked_due": marked}
+    result = await run_daily_recall()
+    return result
+
+
+def _cron_authorized(authorization: Optional[str]) -> bool:
+    secret = os.environ.get("WEBHOOK_CRON_SECRET")
+    if not secret or not authorization:
+        return False
+    parts = authorization.split(" ", 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return False
+    return hmac.compare_digest(parts[1], secret)
+
+
+@api_router.post("/cron/recall-sequence")
+async def cron_recall_sequence(background_tasks: BackgroundTasks,
+                               authorization: Optional[str] = Header(default=None)):
+    # Cron endpoints must ack 2xx immediately; enqueue/background the actual work.
+    if not _cron_authorized(authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    background_tasks.add_task(run_daily_recall)
+    return {"accepted": True}
 
 
 # ---------------------------------------------------------------------------
@@ -616,6 +745,116 @@ async def roi_report():
         "szacunkowy_przychod": revenue,
         "konwersja": conv,
     }
+
+
+_FONTS_READY = False
+
+
+def _ensure_fonts():
+    global _FONTS_READY
+    if _FONTS_READY:
+        return
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    base = "/usr/share/fonts/truetype/liberation"
+    try:
+        pdfmetrics.registerFont(TTFont("PL", f"{base}/LiberationSans-Regular.ttf"))
+        pdfmetrics.registerFont(TTFont("PL-Bold", f"{base}/LiberationSans-Bold.ttf"))
+    except Exception:
+        pdfmetrics.registerFont(TTFont("PL", "/usr/share/fonts/truetype/freefont/FreeSans.ttf"))
+        pdfmetrics.registerFont(TTFont("PL-Bold", "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf"))
+    _FONTS_READY = True
+
+
+@api_router.get("/roi/pdf")
+async def roi_pdf():
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.colors import HexColor
+
+    _ensure_fonts()
+    roi = await roi_report()
+    settings = await db.settings.find_one({}) or DEFAULT_SETTINGS
+    okres_do = now_utc().date()
+    okres_od = okres_do - timedelta(days=30)
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    w, h = A4
+    green = HexColor("#2D6A4F")
+    dark = HexColor("#1C1917")
+    muted = HexColor("#57534E")
+    accent = HexColor("#D4A373")
+
+    # Header band
+    c.setFillColor(green)
+    c.rect(0, h - 45 * mm, w, 45 * mm, fill=1, stroke=0)
+    c.setFillColor(HexColor("#FFFFFF"))
+    c.setFont("PL-Bold", 22)
+    c.drawString(20 * mm, h - 22 * mm, "Raport ROI — recall pacjentów")
+    c.setFont("PL", 12)
+    c.drawString(20 * mm, h - 31 * mm, settings.get("nazwa_gabinetu", ""))
+    c.setFont("PL", 10)
+    c.drawString(20 * mm, h - 38 * mm, f"Okres: {okres_od.isoformat()} — {okres_do.isoformat()}")
+
+    # Big revenue card
+    y = h - 70 * mm
+    c.setFillColor(green)
+    c.roundRect(20 * mm, y, w - 40 * mm, 30 * mm, 6, fill=1, stroke=0)
+    c.setFillColor(HexColor("#FFFFFF"))
+    c.setFont("PL", 11)
+    c.drawString(28 * mm, y + 20 * mm, "Szacunkowy przychód z odzyskanych wizyt")
+    c.setFont("PL-Bold", 28)
+    rev = f"{roi['szacunkowy_przychod']:,}".replace(",", " ") + " zł"
+    c.drawString(28 * mm, y + 7 * mm, rev)
+
+    # Stat rows
+    stats = [
+        ("Wysłanych przypomnień", str(roi["przypomnienia"])),
+        ("Pacjentów zapisanych na wizytę", str(roi["zapisy"])),
+        ("Odrzuceń", str(roi["odrzucenia"])),
+        ("Współczynnik konwersji", f"{roi['konwersja']}%"),
+    ]
+    ry = y - 18 * mm
+    for label, val in stats:
+        c.setStrokeColor(HexColor("#E5E7EB"))
+        c.setLineWidth(0.6)
+        c.line(20 * mm, ry - 3 * mm, w - 20 * mm, ry - 3 * mm)
+        c.setFillColor(muted)
+        c.setFont("PL", 12)
+        c.drawString(22 * mm, ry, label)
+        c.setFillColor(dark)
+        c.setFont("PL-Bold", 14)
+        c.drawRightString(w - 22 * mm, ry, val)
+        ry -= 14 * mm
+
+    # Footer note
+    c.setFillColor(muted)
+    c.setFont("PL", 9)
+    note = ("Jeden odzyskany pacjent (np. leczenie kanałowe ~1500 zł) często zwraca roczny "
+            "koszt subskrypcji. Dane obejmują ostatnie 30 dni.")
+    c.drawString(20 * mm, 25 * mm, note)
+    c.setFillColor(accent)
+    c.setFont("PL-Bold", 9)
+    c.drawString(20 * mm, 18 * mm, f"RecallDent · Plan {settings.get('plan','')}")
+    c.setFillColor(muted)
+    c.setFont("PL", 8)
+    c.drawString(20 * mm, 13 * mm, f"Wygenerowano: {now_utc().strftime('%Y-%m-%d %H:%M')} UTC")
+
+    c.showPage()
+    c.save()
+    buf.seek(0)
+    fname = f"raport_roi_{okres_do.isoformat()}.pdf"
+    return Response(content=buf.read(), media_type="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+
+@api_router.get("/sms-status")
+async def sms_status():
+    return {"skonfigurowane": twilio_configured(),
+            "tryb": "REALNY" if twilio_configured() else "MOCK",
+            "provider": "Twilio"}
 
 
 # ---------------------------------------------------------------------------

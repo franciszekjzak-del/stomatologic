@@ -1,0 +1,9 @@
+crons:
+  - name: recall-sequence
+    description: "Codzienny skan bazy i sekwencja przypomnien (SMS -> +3d email -> +7d SMS) o 09:00"
+    cron: "0 9 * * *"
+    timezone: "Europe/Warsaw"
+    endpoint: "{{BASE_URL}}/api/cron/recall-sequence"
+    method: POST
+    # Cron endpoints must ack 2xx immediately; enqueue/background the actual work.
+    enabled: true

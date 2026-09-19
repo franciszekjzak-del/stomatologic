@@ -2,13 +2,29 @@ import { useEffect, useState } from "react";
 import { api, zl } from "@/lib/api";
 import { PageHeader } from "@/components/Shared";
 import { Card } from "@/components/ui/card";
-import { Send, CalendarCheck, XCircle, TrendingUp, Percent } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Send, CalendarCheck, XCircle, TrendingUp, Percent, FileDown } from "lucide-react";
 import { motion } from "framer-motion";
+import { toast } from "sonner";
 
 export default function RoiReport() {
   const [roi, setRoi] = useState(null);
+  const [downloading, setDownloading] = useState(false);
 
   useEffect(() => { api.get("/roi").then((r) => setRoi(r.data)); }, []);
+
+  const downloadPdf = async () => {
+    setDownloading(true);
+    try {
+      const res = await api.get("/roi/pdf", { responseType: "blob" });
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement("a");
+      a.href = url; a.download = "raport_roi.pdf"; a.click();
+      URL.revokeObjectURL(url);
+      toast.success("Pobrano raport PDF");
+    } catch { toast.error("Nie udało się wygenerować PDF"); }
+    setDownloading(false);
+  };
 
   const stats = roi ? [
     { label: "Wysłanych przypomnień", value: roi.przypomnienia, icon: Send, cls: "text-sky-600 bg-sky-50" },
@@ -19,7 +35,15 @@ export default function RoiReport() {
 
   return (
     <div data-testid="roi-page">
-      <PageHeader title="Raport ROI" subtitle="Podsumowanie ostatnich 30 dni — realna wartość odzyskanych pacjentów" />
+      <PageHeader
+        title="Raport ROI"
+        subtitle="Podsumowanie ostatnich 30 dni — realna wartość odzyskanych pacjentów"
+        action={
+          <Button data-testid="download-pdf-btn" onClick={downloadPdf} disabled={downloading} className="gap-2">
+            <FileDown className="h-4 w-4" /> {downloading ? "Generowanie..." : "Pobierz PDF"}
+          </Button>
+        }
+      />
 
       <motion.div
         initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }}

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { PageHeader } from "@/components/Shared";
 import { Card } from "@/components/ui/card";
-import { Smartphone, Mail, CheckCheck } from "lucide-react";
+import { Smartphone, Mail, CheckCheck, Info } from "lucide-react";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
@@ -10,10 +10,13 @@ import {
 export default function Messages() {
   const [msgs, setMsgs] = useState([]);
   const [typ, setTyp] = useState("WSZYSTKIE");
+  const [smsMode, setSmsMode] = useState(null);
 
   useEffect(() => {
     api.get("/reminders", { params: { typ } }).then((r) => setMsgs(r.data));
   }, [typ]);
+
+  useEffect(() => { api.get("/sms-status").then((r) => setSmsMode(r.data)); }, []);
 
   return (
     <div data-testid="messages-page">
@@ -31,6 +34,20 @@ export default function Messages() {
           </Select>
         }
       />
+
+      {smsMode && (
+        <div data-testid="sms-mode-banner" className={`mb-4 rounded-xl border p-4 text-sm flex items-start gap-3 ${
+          smsMode.skonfigurowane ? "bg-emerald-50 border-emerald-200 text-emerald-800" : "bg-amber-50 border-amber-200 text-amber-800"
+        }`}>
+          <Info className="h-4 w-4 mt-0.5 shrink-0" />
+          <div>
+            <b>Bramka SMS: {smsMode.tryb}</b> ({smsMode.provider}).{" "}
+            {smsMode.skonfigurowane
+              ? "Wiadomości SMS są realnie wysyłane do pacjentów."
+              : "SMS działa w trybie symulacji — dodaj klucze Twilio (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER), aby wysyłać realne wiadomości. Email pozostaje w trybie MOCK."}
+          </div>
+        </div>
+      )}
 
       <div className="space-y-3">
         {msgs.map((m) => (
