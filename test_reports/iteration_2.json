@@ -1,0 +1,29 @@
+{
+  "summary": "Iteration 2 testing of dental recall MVP new features (ROI PDF, Twilio SMS gateway MOCK, cron endpoint with bearer auth, multi-channel reminder sequence). Backend: 21/21 pytest tests passed including all 8 newly added tests: GET /api/sms-status returns skonfigurowane=false/tryb=MOCK/provider=Twilio; GET /api/roi/pdf returns application/pdf with Content-Disposition attachment and 52KB PDF starting with %PDF header; POST /api/cron/recall-sequence returns 401 without auth and with wrong bearer, 200 {accepted:true} with correct bearer from WEBHOOK_CRON_SECRET and after ~3s DO_PRZYPOMNIENIA patients move to PRZYPOMNIANY with new SMS reminders (krok_sekwencji=1, mock=true); POST /api/recall/run now returns marked_due + nowe_sms + email + final_sms counters; sequence logic verified: SMS-only-consent patient -> step1 SMS reminder + status PRZYPOMNIANY + sekwencja_krok=1; email-only-consent patient -> step2 EMAIL reminder + sekwencja_krok=2; existing endpoints (patient CRUD, remind SMS/EMAIL, consent 400s, exclude/include, CSV import, procedures, templates, settings, reminders list, ROI, booking flow) still pass. Frontend: /raport-roi Pobierz PDF button (data-testid=download-pdf-btn) triggers PDF download (raport_roi.pdf, 52KB, %PDF header) with no errors; /wiadomosci shows sms-mode-banner with correct Polish text 'Bramka SMS: MOCK (Twilio). SMS działa w trybie symulacji ... Email pozostaje w trybie MOCK.'",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/admin/reset-demo (seed)", "issue": "Seed patients dict does not explicitly include sekwencja_krok field, so ~22/32 seeded patients lack this key in GET /api/patients responses (only patients touched by _send_reminder gain it). Code uses .get('sekwencja_krok', 1) defensively so functionality is not broken, but for API consistency seed should set sekwencja_krok=0 like the Patient Pydantic model default."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": ["/app/backend/tests/backend_test.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "(Optional/minor) Add 'sekwencja_krok': 0 to seed patients dict in server.py (~line 197) for API response consistency."
+  ],
+  "critical_code_review_comments": [
+    "server.py grew from 739 to 978 lines - splitting into routes/services modules is now more urgent.",
+    "_cron_authorized correctly uses hmac.compare_digest for constant-time bearer comparison - good.",
+    "advance_sequences correctly branches on zgoda_sms/zgoda_email consent for step2/step3 - verified via test.",
+    "run_daily_recall bundles scan + advance_sequences and returns combined counters - good.",
+    "PDF endpoint uses reportlab with Liberation Sans for Polish diacritics - PDF 52KB with valid %PDF header.",
+    "Seed initialisation does not set sekwencja_krok field explicitly on inserted docs (relies on .get defaults). Minor inconsistency."
+  ],
+  "updated_files": ["/app/backend/tests/backend_test.py"],
+  "success_rate": {"backend": "100% (21/21)", "frontend": "100%"},
+  "test_credentials": "No app auth (demo). Cron bearer read from /app/backend/.env WEBHOOK_CRON_SECRET.",
+  "seed_data_creation": "Created ephemeral test patients (SEQSMS, SEQEMAIL) for consent-branch sequence test; deleted at end. Called /api/admin/reset-demo for predictable counts.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "backend_test.py now has 21 tests. Iteration 2 adds tests for /api/sms-status, /api/roi/pdf, /api/cron/recall-sequence (auth & background side-effects with ~3s sleep), /api/recall/run counters, sequence logic with per-consent branching, and reset-demo sekwencja_krok smoke check. CRON_SECRET is read from /app/backend/.env at test-collection time. Both new UI elements verified: data-testid=download-pdf-btn (RoiReport.jsx) and data-testid=sms-mode-banner (Messages.jsx)."
+}

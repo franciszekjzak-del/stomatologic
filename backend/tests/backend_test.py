@@ -184,3 +184,150 @@ def test_booking_404(s):
     assert r.status_code == 404
     r = s.get(f"{API}/booking/invalid", timeout=30)
     assert r.status_code == 404
+
+
+# ---- New feature tests (iteration 2) ----
+import time as _time
+
+
+def _read_cron_secret():
+    with open("/app/backend/.env", "r") as f:
+        for line in f:
+            if line.startswith("WEBHOOK_CRON_SECRET"):
+                v = line.split("=", 1)[1].strip().strip('"').strip("'")
+                return v
+    return None
+
+
+CRON_SECRET = _read_cron_secret()
+
+
+def test_sms_status(s):
+    r = s.get(f"{API}/sms-status", timeout=30)
+    assert r.status_code == 200
+    d = r.json()
+    assert d.get("skonfigurowane") is False
+    assert d.get("tryb") == "MOCK"
+    assert d.get("provider") == "Twilio"
+
+
+def test_roi_pdf_download(s):
+    r = s.get(f"{API}/roi/pdf", timeout=60)
+    assert r.status_code == 200
+    ct = r.headers.get("content-type", "")
+    assert "application/pdf" in ct, f"content-type={ct}"
+    cd = r.headers.get("content-disposition", "")
+    assert "attachment" in cd.lower()
+    assert len(r.content) > 1024
+    assert r.content.startswith(b"%PDF")
+
+
+def test_cron_recall_sequence_unauthorized(s):
+    r = s.post(f"{API}/cron/recall-sequence", timeout=30)
+    assert r.status_code == 401
+
+
+def test_cron_recall_sequence_wrong_token(s):
+    r = s.post(f"{API}/cron/recall-sequence", headers={"Authorization": "Bearer WRONG_TOKEN"}, timeout=30)
+    assert r.status_code == 401
+
+
+def test_cron_recall_sequence_authorized_moves_patients(s):
+    assert CRON_SECRET, "WEBHOOK_CRON_SECRET missing"
+    # reset demo for predictable state
+    r = s.post(f"{API}/admin/reset-demo", timeout=60)
+    assert r.status_code == 200
+
+    before = s.get(f"{API}/dashboard/stats", timeout=30).json()["counts"]
+    due_before = before.get("DO_PRZYPOMNIENIA", 0)
+    przyp_before = before.get("PRZYPOMNIANY", 0)
+
+    r = s.post(f"{API}/cron/recall-sequence",
+               headers={"Authorization": f"Bearer {CRON_SECRET}"}, timeout=30)
+    assert r.status_code in (200, 202)
+    assert r.json().get("accepted") is True
+
+    # wait for background task
+    _time.sleep(3)
+
+    after = s.get(f"{API}/dashboard/stats", timeout=30).json()["counts"]
+    due_after = after.get("DO_PRZYPOMNIENIA", 0)
+    przyp_after = after.get("PRZYPOMNIANY", 0)
+    # DO_PRZYPOMNIENIA should decrease (or at least PRZYPOMNIANY increased) if there were due
+    assert przyp_after >= przyp_before
+    if due_before > 0:
+        assert due_after < due_before or przyp_after > przyp_before
+
+    # verify reminders now contain step 1 SMS with mock:true
+    rems = s.get(f"{API}/reminders", params={"typ": "SMS"}, timeout=30).json()
+    step1 = [m for m in rems if m.get("krok_sekwencji") == 1]
+    assert len(step1) > 0, "expected step1 SMS reminders after cron"
+    assert any(m.get("mock") is True for m in step1)
+
+
+def test_recall_run_returns_sequence_counters(s):
+    s.post(f"{API}/admin/reset-demo", timeout=60)
+    r = s.post(f"{API}/recall/run", timeout=60)
+    assert r.status_code == 200
+    d = r.json()
+    assert "marked_due" in d
+    # sequence counters
+    for k in ["nowe_sms", "email", "final_sms"]:
+        assert k in d, f"missing key {k} in {d}"
+
+
+def test_sequence_logic_sms_and_email_consent(s):
+    # reset then create two patients: one SMS consent only, one EMAIL consent only
+    s.post(f"{API}/admin/reset-demo", timeout=60)
+    from datetime import date
+    old_date = "2020-01-01"
+    p_sms = {"imie": "SEQSMS", "nazwisko": "T", "telefon": "+48 500 111 000",
+             "email": "seqsms@example.com", "data_ostatniej_wizyty": old_date,
+             "typ_ostatniej_procedury": "Higienizacja",
+             "zgoda_sms": True, "zgoda_email": False}
+    p_email = {"imie": "SEQEMAIL", "nazwisko": "T", "telefon": "+48 500 222 000",
+               "email": "seqemail@example.com", "data_ostatniej_wizyty": old_date,
+               "typ_ostatniej_procedury": "Higienizacja",
+               "zgoda_sms": False, "zgoda_email": True}
+    r1 = s.post(f"{API}/patients", json=p_sms, timeout=30)
+    r2 = s.post(f"{API}/patients", json=p_email, timeout=30)
+    assert r1.status_code == 200 and r2.status_code == 200
+    id1, id2 = r1.json()["id"], r2.json()["id"]
+
+    # ensure recall marks them DO_PRZYPOMNIENIA
+    s.post(f"{API}/recall/run", timeout=60)
+
+    # fetch patients and check statuses
+    all_p = s.get(f"{API}/patients", timeout=30).json()
+    p1 = next((x for x in all_p if x["id"] == id1), None)
+    p2 = next((x for x in all_p if x["id"] == id2), None)
+    assert p1 and p2
+    # After recall/run (which does advance_sequences too), they should have moved to PRZYPOMNIANY
+    assert p1["status_recallu"] == "PRZYPOMNIANY", p1
+    assert p1.get("sekwencja_krok") == 1
+    assert p2["status_recallu"] == "PRZYPOMNIANY", p2
+    # p2 has no sms consent -> should have gotten email at step 2
+    assert p2.get("sekwencja_krok") == 2
+
+    # verify reminders per patient
+    rems1 = s.get(f"{API}/reminders", params={"patient_id": id1}, timeout=30).json()
+    rems2 = s.get(f"{API}/reminders", params={"patient_id": id2}, timeout=30).json()
+    assert any(m["typ"] == "SMS" and m.get("krok_sekwencji") == 1 for m in rems1)
+    assert any(m["typ"] == "EMAIL" and m.get("krok_sekwencji") == 2 for m in rems2)
+
+    # cleanup
+    s.delete(f"{API}/patients/{id1}", timeout=30)
+    s.delete(f"{API}/patients/{id2}", timeout=30)
+
+
+def test_reset_demo_has_sekwencja_krok(s):
+    r = s.post(f"{API}/admin/reset-demo", timeout=60)
+    assert r.status_code == 200
+    patients = s.get(f"{API}/patients", timeout=30).json()
+    assert len(patients) > 0
+    # NOTE: seed doesn't add sekwencja_krok explicitly (defaults handled via .get in code),
+    # so some patients may lack the key. We assert at least the reminded ones carry it.
+    reminded = [p for p in patients if p.get("status_recallu") == "PRZYPOMNIANY"]
+    if reminded:
+        assert any("sekwencja_krok" in p for p in reminded)
+

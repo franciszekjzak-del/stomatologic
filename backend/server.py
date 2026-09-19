@@ -203,6 +203,7 @@ async def seed_if_empty():
                 "typ_ostatniej_procedury": proc["nazwa"],
                 "status_recallu": STATUS_ACTIVE,
                 "data_ostatniego_przypomnienia": None,
+                "sekwencja_krok": 0,
                 "zgoda_sms": random.random() > 0.15,
                 "zgoda_email": random.random() > 0.3,
                 "wykluczony": False,
