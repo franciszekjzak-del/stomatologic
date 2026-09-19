@@ -1,0 +1,116 @@
+{
+  "theme": "light",
+  "typography": {
+    "fonts": {
+      "heading": "Outfit",
+      "body": "DM Sans",
+      "mono": "JetBrains Mono"
+    },
+    "hierarchy": {
+      "h1": "text-4xl sm:text-5xl tracking-tight font-bold",
+      "h2": "text-2xl sm:text-3xl tracking-tight font-semibold",
+      "h3": "text-xl sm:text-2xl tracking-tight font-medium",
+      "h4": "text-lg sm:text-xl font-medium",
+      "body": "text-base leading-relaxed",
+      "small": "text-sm",
+      "overline": "text-xs uppercase tracking-[0.2em] font-semibold"
+    },
+    "rules": [
+      "NEVER use generic sans like Inter or Roboto for headings.",
+      "Use tracking-tight for all headings above 32px.",
+      "Jump between heading and subheading must not exceed 2 Tailwind steps."
+    ]
+  },
+  "colors": {
+    "archetype": "ORGANIC & EARTHY",
+    "palette": {
+      "background": "#F9FAFB",
+      "surface": "#FFFFFF",
+      "primary": "#2D6A4F",
+      "primary_hover": "#1B4332",
+      "accent": "#D4A373",
+      "text_main": "#1C1917",
+      "text_muted": "#57534E",
+      "border": "#E5E7EB",
+      "success": "#2A9D8F",
+      "error": "#E63946",
+      "warning": "#E9C46A"
+    },
+    "rules": [
+      "Tinted Grey Rule: Never use pure black #000000 or pure #808080. Always tint neutrals.",
+      "Hover states must be explicitly defined for text (e.g., hover:bg-primary hover:text-white).",
+      "Limit primary color to CTAs, active states, and key data points."
+    ]
+  },
+  "layouts": {
+    "dashboard_web": {
+      "type": "Mode B: High Density Grid",
+      "navigation": "Collapsible left sidebar navigation (w-64) with brand logo and modular menu items.",
+      "spacing": "Tight gaps (gap-4 or gap-6) for data correlation.",
+      "components": [
+        "Top-left North Star metrics using bento grids (Do przypomnienia, Przypomniano, Zapisano, Odrzucono).",
+        "Classic charts (Area chart for 30-day reminder vs booking).",
+        "Dense data tables for Lista pacjentów (Patient list) with global filters."
+      ],
+      "surface_style": "Grid Borders / Technical Look. Flat solid background, 1px subtle border, no shadows for a crisp medical feel."
+    },
+    "patient_mobile": {
+      "type": "Mode A: Tetris Grid / Stacked",
+      "navigation": "Minimal top bar, floating action buttons.",
+      "spacing": "Generous spacing (p-6, p-8) to create trust and calmness.",
+      "components": [
+        "Hero section with doctor/clinic image.",
+        "Personalized greeting message card.",
+        "Calendar picker for date selection.",
+        "Confirmation/Rejection buttons with distinct primary/accent styling."
+      ],
+      "surface_style": "Neumorphism / Tactile. Soft clean surfaces with slightly larger border-radius (rounded-2xl)."
+    }
+  },
+  "components": {
+    "buttons": "Pill-shaped or rounded-lg with clear interaction animations (hover:-translate-y-0.5, transition-transform).",
+    "inputs": "Shadcn UI Input, Select, and Form components. Custom borders using #E5E7EB, focus ring with primary color.",
+    "tables": "Shadcn Table for the patient list. Dense rows, sticky headers, explicit hover states.",
+    "calendar": "Shadcn Calendar for booking. Do not use native <input type='date'>.",
+    "toast": "Use Sonner for notifications (located in /app/src/components/ui/sonner.tsx)."
+  },
+  "visual_enhancers": {
+    "motion": [
+      "Staggered entrance animations for dashboard cards (Framer Motion).",
+      "Smooth state changes for booking steps in the patient view.",
+      "Micro-animations on hover for all interactive elements."
+    ],
+    "icons": "Use lucide-react for all standard iconography (dashboard menus, actions).",
+    "data_viz": "Use Recharts (Shadcn chart) for the ROI / 30-day recall vs booked chart."
+  },
+  "media": {
+    "image_urls": {
+      "patient_view_hero": {
+        "url": "https://images.pexels.com/photos/5355860/pexels-photo-5355860.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+        "description": "Smiling female medical professional posing in a modern dental clinic. Use this in the patient-facing mobile booking flow to build trust."
+      }
+    },
+    "rules": [
+      "Never use placeholder URLs.",
+      "Images must be responsive and not exceed 80vh on mobile."
+    ]
+  },
+  "accessibility": {
+    "rules": [
+      "Minimum 4.5:1 contrast ratio for normal text.",
+      "Include data-testid attribute on ALL interactive and key informational elements (buttons, inputs, menu items, table rows).",
+      "Respect prefers-reduced-motion for animations.",
+      "Keyboard navigable forms and data grids."
+    ]
+  },
+  "instructions_to_main_agent": [
+    "Build a dual-interface application: A web-first dashboard for clinic admins, and a mobile-first booking landing page for patients.",
+    "Implement the Dashboard with a left sidebar layout, top stat cards (bento style), a 30-day line/area chart using Recharts, a data table for patients, and a settings view for recall intervals and SMS/Email templates.",
+    "Implement the Mobile Patient View as a separate route (e.g. /booking/:id) simulating a mobile screen. It should feature a friendly greeting, a Shadcn calendar for date selection, and clear Accept/Reject actions.",
+    "Ensure all text is in Polish as per the problem statement (e.g. 'Do przypomnienia', 'Lista pacjentów', 'Raport ROI').",
+    "Use Outfit for headings and DM Sans for body text.",
+    "Ensure the dashboard cards do NOT have heavy shadows; use a 1px subtle border for a clean, medical SaaS look.",
+    "Add 'data-testid' to every button, link, and input.",
+    "Use Tailwind CSS for all styling, avoid generic centered text."
+  ]
+}
