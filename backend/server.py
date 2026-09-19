@@ -547,6 +547,8 @@ async def send_24h_reminders() -> int:
     settings = await db.settings.find_one({}) or DEFAULT_SETTINGS
     templates = await db.templates.find_one({}) or DEFAULT_TEMPLATES
     tpl = templates.get("sms_24h") or DEFAULT_TEMPLATES["sms_24h"]
+    if "{link_potwierdzenia}" not in tpl:
+        tpl += " Potwierdź lub odwołaj: {link_potwierdzenia}"
     now = now_utc()
     lo, hi = iso(now), iso(now + timedelta(hours=48))
     sent = 0
@@ -1451,8 +1453,13 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 
+OLD_SMS_24H = "Przypominamy: jutro {data_wizyty} o {godzina_wizyty} masz wizytę w {nazwa_gabinetu}, {adres}. W razie zmiany planów prosimy o kontakt: {telefon_gabinetu}."
+
+
 @app.on_event("startup")
 async def startup():
+    await raw_db.templates.update_many({"$or": [{"sms_24h": OLD_SMS_24H}, {"sms_24h": {"$exists": False}}]},
+                                       {"$set": {"sms_24h": DEFAULT_TEMPLATES["sms_24h"]}})
     await auth.ensure_indexes()
     await auth.seed_admin(_migrate_orphans)
 

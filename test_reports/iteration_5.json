@@ -1,0 +1,44 @@
+{
+  "summary": "Iteration 5 (Team accounts / Appointment confirmation TAK-NIE / Password reset) tested end-to-end. Backend: 28/29 pytest pass in /app/backend/tests/test_iteration5_team_confirm_reset.py — the only failure is a legacy-template regression (admin clinic's sms_24h stored in Mongo is missing {link_potwierdzenia}; same issue flagged as minor in iteration_4). Frontend Playwright: owner login → /nadchodzace, /zespol (invite + link box + member list + cancel invite + accept in fresh context → user-role='Recepcja'); recepcja login → no nav-team / no reset-demo-btn, /ustawienia + /szablony + /ustawienia-recallu show readonly-banner and hide save buttons, /zespol redirects to /panel; public /potwierdz/<aid> shows confirm-visit-page + confirm-yes-btn → confirm-result-yes, bad id → confirm-error; /logowanie forgot-password-link → /nie-pamietam-hasla → forgot-sent; /reset-hasla/<t> with mismatched passwords → reset-error; regression patients (32 rows) + wiadomosci badge-24h (2) + badge-inbound (6) OK. Recepcja password restored to Recepcja123! at end of pytest run (verified via login).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/templates", "issue": "Admin clinic's sms_24h template (created pre-iteration-3) still lacks {link_potwierdzenia} placeholder. Iteration-5 requirement: sms_24h must contain {link_potwierdzenia}. Same root cause as iteration-4: GET /api/templates does not merge DEFAULT_TEMPLATES on missing keys, and no one-time backfill exists. Fix by either (a) $set-on-startup a defaults-merge for existing template docs, or (b) merge DEFAULT_TEMPLATES on read in get_templates()."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {"flow": "Appointments page counters on initial load", "issue": "First visit to /nadchodzace occasionally shows total=0/confirmed=0/cancelled=0 even when appointments exist (rendered before fetch resolves). Not blocking — reload/second visit displays correct counters — but suggests appt-total/appt-confirmed/appt-cancelled render before data arrives.", "affected_selectors": ["appt-total", "appt-confirmed", "appt-cancelled"]}
+    ],
+    "design_issues": [
+      {"screen": "Dashboard chart (regression)", "issues": ["Recharts still warns 'width(-1) and height(-1) of chart should be greater than 0' on first paint — cosmetic, previously reported."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration5_team_confirm_reset.py",
+    "/app/test_reports/pytest/iteration5_results.xml"
+  ],
+  "action_items": [
+    "Merge DEFAULT_TEMPLATES on GET /api/templates or run a one-time backfill so pre-existing templates docs expose sms_24h containing {link_potwierdzenia}. Blocks iteration-5 acceptance criterion 'GET /api/templates ma sms_24h z {link_potwierdzenia}'.",
+    "(nice-to-have) Guard AppointmentsPage counters against pre-data render — e.g. show '—' or skeleton until list is loaded, so counters never flash 0/0/0."
+  ],
+  "critical_code_review_comments": [
+    "auth.py: invite_accept creates account and immediately sets httpOnly refresh/access cookies same-site=none — good. But payload.imie override always wins over inv.imie only when non-empty (line 311 uses payload.imie.strip() OR inv.imie) — correct.",
+    "server.py _apply_reply writes reminders with rodzaj='ODPOWIEDZ_PACJENTA' via raw_db (bypassing tenant filter) but sets clinic_id from appt.get('clinic_id') — verified working. Good.",
+    "sms/inbound matcher uses regex '\\\\D*'.join(last 6 digits) + secondary exact-9-digit compare — robust to '+48 500 111 222' vs '+48500111222' formats. Verified.",
+    "server.py still ~1465 lines — splitting into routers (appointments, team=auth, booking, sms) is overdue (repeated feedback).",
+    "GET /appointments/{aid}/public leaks appointment 'procedura' + full 'pacjent_imie'; matches spec (patient sees own visit). resend_api_key stripped via _public_settings ✓.",
+    "password_resets: no invalidation of other outstanding tokens when a new one is generated (multiple valid tokens can coexist for same user). Low risk (1h TTL), but consider marking previous tokens uzyte=true or delete_many at forgot-password step."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration5_team_confirm_reset.py"
+  ],
+  "success_rate": {"backend": "96.6% (28/29)", "frontend": "100% of iteration-5 flows"},
+  "test_credentials": "Owner franciszek.j.zak@gmail.com / RecallDent2026!, Recepcja recepcja.demo@example.com / Recepcja123! (restored at end of pytest run — verified by explicit re-login). Second clinic test.gabinet@example.com / Test12345!.",
+  "seed_data_creation": "Created ephemeral invite qa.recepcja+<ts>@example.com (owner clinic) — invite accepted then user deleted by test_delete_recepcja. Created ephemeral invite qa.playwright+<ts>@example.com via Playwright and accepted it (user remains in owner's clinic — cleanup deferred; visible in /zespol as 'Recepcja'). Several ONLINE appointments booked via public /booking/{pid}/confirm during confirmation tests; two flipped to ODWOLANA and two to potwierdzona=true.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Iteration-5 endpoints added: POST/GET /api/auth/invite[/token[/accept]], GET/DELETE /api/auth/users[/id], POST /api/auth/forgot-password, POST /api/auth/reset-password, GET /api/appointments/{aid}/public, POST /api/appointments/{aid}/respond (public), POST /api/appointments/{aid}/simulate-reply (owner+recepcja), POST /api/sms/inbound (form From/Body, public XML response). Owner-only guards on: PUT /api/settings, PUT /api/templates, POST/PUT/DELETE /api/procedures, DELETE /api/patients/{id}, POST /api/admin/reset-demo, POST /api/settings/test-email, all /api/auth/{invite,users}. Regression suite: /app/backend/tests/test_iteration4_auth_tenant.py + /app/backend/tests/test_iteration5_team_confirm_reset.py (run both with pytest -o 'addopts=' to disable xdist). Recepcja can hit /api/patients/{id}/remind (verified), /api/appointments/upcoming, GET /api/settings + GET /api/templates. Playwright selectors for iteration-5: invite-email-input/invite-submit-btn/invite-link-box, member-*, cancel-invite-*, invite-accept-form, user-role, appt-total/appt-confirmed/appt-cancelled, simulate-yes-*, confirm-visit-page/confirm-yes-btn/confirm-no-btn/confirm-result-yes/confirm-error, forgot-password-link/forgot-email-input/forgot-submit-btn/forgot-sent, reset-password-input/reset-password2-input/reset-submit-btn/reset-error, readonly-banner.",
+  "rca of the issue": "sms_24h missing {link_potwierdzenia}: server.DEFAULT_TEMPLATES contains the correct template with the placeholder, but seed_if_empty only inserts DEFAULT_TEMPLATES when the templates collection is empty for the clinic. Admin clinic's templates doc was created before sms_24h + {link_potwierdzenia} were introduced, so its stored sms_24h remains the old string. GET /api/templates returns the stored doc verbatim (no defaults merge). Reproduction: 1) fresh recepcja login, 2) GET /api/templates as owner, 3) inspect sms_24h — still 'Przypominamy: jutro {data_wizyty} o {godzina_wizyty} masz wizytę w {nazwa_gabinetu}, {adres}. W razie zmiany planów prosimy o kontakt: {telefon_gabinetu}.' Mitigation options: (a) in get_templates(), return {**DEFAULT_TEMPLATES, **stored}; (b) run one-time startup migration that $set updates any templates doc where sms_24h missing/lacks {link_potwierdzenia}."
+}

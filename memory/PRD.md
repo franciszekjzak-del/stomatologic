@@ -49,15 +49,20 @@ MVP SaaS dla gabinetów stomatologicznych (1–3 foteli, Polska), który automat
 - ✅ SMS 24h przed wizytą (szablon `sms_24h`, cron + ręczny trigger `/appointments/send-24h-reminders`, badge w Wiadomościach)
 - ✅ Testy: 25/25 backend + frontend flows (iteration_4)
 
+### 2026-06-20 (iter. 5)
+- ✅ Konta pracowników: role owner/recepcja, zaproszenia emailem (7 dni), akceptacja `/zaproszenie/{token}`, strona „Zespół gabinetu”, owner-only endpointy (settings, templates, procedures, delete patient, reset-demo) → 403, banner read-only w UI
+- ✅ Potwierdzenie wizyty TAK/NIE: webhook `/api/sms/inbound` (Twilio format), publiczna strona `/potwierdz/{aid}`, symulacja w panelu, strona „Nadchodzące wizyty” ze statusem; NIE → wizyta ODWOLANA, pacjent wraca do recallu
+- ✅ Reset hasła: `/nie-pamietam-hasla` → email (Emergent Resend) z linkiem `/reset-hasla/{token}` (1h, jednorazowy)
+- ✅ Testy: 29/29 backend (po poprawce migracji szablonu sms_24h) + frontend flows (iteration_5)
+
 ## Backlog / Remaining
-- P0: Realny SMS — użytkownik odrzucił Twilio (koszt ~20$); rozważyć tańszą polską bramkę (SMSAPI, SerwerSMS) — SMS pozostaje MOCK
-- P2: Reset hasła (forgot/reset-password) + zaproszenia pracowników do gabinetu
+- P0: Realny SMS — użytkownik odrzucił Twilio (~20$) i SMSAPI (49 zł start); SMS pozostaje MOCK do czasu wyboru bramki
 - P2: Walidacja slotów po stronie API (format HH:MM, data >= dziś), sprawdzanie istnienia slotu przy reczne_terminy
 - P2: Refactor server.py (1151 linii) na routery/serwisy
 - P2: Integracja API z systemami gabinetowymi (SmartDental, Dentidesk, Medfile)
 - P2: Zarządzanie zgodami RODO + umowa powierzenia
 
 ## Next Tasks
-- Polska bramka SMS (SMSAPI/SerwerSMS) jako alternatywa dla Twilio
-- Reset hasła emailem
+- Bramka SMS (gdy użytkownik zdecyduje)
+- Email 24h przed wizytą jako darmowa alternatywa dla SMS
 - Walidacja slotów po stronie API
