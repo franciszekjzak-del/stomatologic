@@ -1,0 +1,43 @@
+{
+  "summary": "Iteration 4: JWT auth (register/login/me/protected), multi-tenant isolation, per-clinic email sender (Resend), public booking safety, 24h SMS reminders, cron secret, sms_24h template — all verified. Backend: 25/25 pytest pass in /app/backend/tests/test_iteration4_auth_tenant.py. Iteration 1-3 regression tests (backend_test.py, 33 tests) not re-run because those endpoints are now behind auth — new file covers regression touching auth (dashboard, roi/pdf, patients list, settings, templates). Frontend Playwright: /panel→/logowanie redirect works; wrong password shows login-error 'Nieprawidłowy email lub hasło'; correct login lands on /panel with user-email + clinic-name + logout-btn; /ustawienia email-sender-card toggles badge from 'Domena Emergent (domyślna)' → 'Własna domena: przypomnienia@gabinet.pl' after save-settings-btn; test-email-btn with bad Resend key produces toast 'Resend: API key is invalid' (400); /szablony sms-24h-template visible, edit + save-templates-btn OK; /wiadomosci send-24h-btn triggers dispatch, badge-24h appears on 24h reminder card; logout returns to /logowanie; /rejestracja submits successfully and lands on /panel with user-email of new account.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/templates", "issue": "For clinics whose templates doc was created before the sms_24h field existed, GET returns no sms_24h key (no defaults backfill). UI treats missing as empty string and PUT persists correctly, so functionally OK, but users may see an empty field even though DEFAULT_TEMPLATES has a good default. Fix: merge DEFAULT_TEMPLATES on read, or run a one-time backfill on startup."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {"flow": "Register new clinic", "issue": "Immediately after /rejestracja succeeds and redirects to /panel, sidebar clinic-name renders default 'Gabinet' rather than the newly submitted nazwa_gabinetu. Backend confirms settings.nazwa_gabinetu is correct within ~1s, so this is a client-side stale-read race (Layout fetches settings before background _seed_new_clinic finishes). Fix: refetch settings after registration success or drive clinic-name from user.clinic_id/user-side field.", "affected_selectors": ["clinic-name"]}
+    ],
+    "design_issues": [
+      {"screen": "Dashboard chart", "issues": ["Recharts warns 'width(-1) and height(-1) of chart should be greater than 0' (ResponsiveContainer inside a briefly zero-size parent). Purely cosmetic console noise; chart renders after mount."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration4_auth_tenant.py",
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/iteration4_results.xml"
+  ],
+  "action_items": [
+    "Merge DEFAULT_TEMPLATES on GET /api/templates (or backfill sms_24h) so pre-existing template docs expose the field.",
+    "Post-registration: force a settings refetch (or drive sidebar clinic-name from user.nazwa_gabinetu) so the new clinic name appears immediately without race."
+  ],
+  "critical_code_review_comments": [
+    "auth.py cookies set with samesite='none' + secure=True is correct for cross-origin preview, but CORS is added AFTER routers with allow_origins from env — verify CORS_ORIGINS env matches the preview host so that cookie-based refresh actually works from the browser.",
+    "server.py is now 1340 lines; splitting auth-gated resources (patients, settings, reminders, booking, cron) into routers modules is overdue.",
+    "_public_settings strips resend_api_key/email_reply_to before returning booking gabinet — verified. Good.",
+    "send_24h_reminders is idempotent per appointment via przypomnienie_24h flag — verified: second call returns wyslano:0.",
+    "run_daily_recall_all_clinics iterates clinics with set_clinic; on exception it logs but continues — good.",
+    "seed_admin.migrate_orphans reassigns docs without clinic_id to admin clinic and seeds again if empty — potentially double-seeds if admin already has some data but was re-created; low-risk given first-run scenario.",
+    "Templates GET does not merge DEFAULT_TEMPLATES; legacy docs miss sms_24h field."
+  ],
+  "updated_files": ["/app/backend/tests/test_iteration4_auth_tenant.py"],
+  "success_rate": {"backend": "100% (25/25 new)", "frontend": "100% of iteration-4 flows"},
+  "test_credentials": "Admin franciszek.j.zak@gmail.com/RecallDent2026!, second clinic test.gabinet@example.com/Test12345! (0 patients). Cron secret read from /app/backend/.env WEBHOOK_CRON_SECRET.",
+  "seed_data_creation": "Registered ephemeral qa+<timestamp>@example.com clinics for register/isolation tests; test.gabinet@example.com settings.telefon mutated then restored; admin resend_api_key persisted then cleared during test (final state: cleared → email_wlasna_domena=false).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Iteration 4 added JWT auth + multi-tenant. Use /app/backend/tests/test_iteration4_auth_tenant.py as the primary regression suite; it covers dashboard, roi/pdf, templates, settings, patients (via auth). Legacy /app/backend/tests/backend_test.py issues unauthenticated requests to /api endpoints that are now 401 — do NOT run it as-is; either add auth fixtures or replace. Frontend flows use data-testid: login-email-input, login-password-input, login-submit-btn, login-error, register-clinic-input/email-input/password-input/demo-checkbox/submit-btn, user-email, clinic-name, logout-btn, email-sender-card, email-sender-mode, setting-email-nadawca, setting-resend-key, save-settings-btn, test-email-input, test-email-btn, sms-24h-template, save-templates-btn, send-24h-btn, badge-24h. Cron endpoint is /api/cron/recall-sequence (Bearer secret) and manual 24h dispatch is /api/appointments/send-24h-reminders (Bearer user). Brute-force lockout is 5/15min per ip:email — do not exceed 3 bad attempts on admin per test run."
+}

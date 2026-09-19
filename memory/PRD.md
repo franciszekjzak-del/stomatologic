@@ -4,9 +4,9 @@
 MVP SaaS dla gabinetów stomatologicznych (1–3 foteli, Polska), który automatycznie identyfikuje pacjentów wymagających wizyty kontrolnej i wysyła spersonalizowane przypomnienia SMS/email z linkiem do zapisu — bez angażowania recepcji. Model subskrypcyjny 79–129 zł/mies.
 
 ## User Choices
-- Uwierzytelnianie: BRAK (tryb demo)
+- Uwierzytelnianie: JWT email+hasło, konto właściciela per gabinet, multi-tenant (clinic_id przez ContextVar TenantDB)
 - SMS: Twilio (integracja gotowa, tryb MOCK — brak poprawnych kluczy: podano SK... zamiast Account SID AC... i brak numeru nadawcy)
-- Email: Resend zarządzany przez Emergent — REALNY (from: EMAIL_FROM_NAME)
+- Email: Resend zarządzany przez Emergent (domyślnie) LUB własny klucz Resend + adres nadawcy per gabinet (Ustawienia gabinetu)
 - Cron: codziennie 09:00 Europe/Warsaw
 - Sekwencja: Dzień 0 SMS → +3 dni email → +7 dni SMS → koniec
 - Design: wybór agenta (paleta zieleń szałwiowa, Outfit + DM Sans)
@@ -42,16 +42,22 @@ MVP SaaS dla gabinetów stomatologicznych (1–3 foteli, Polska), który automat
 - ✅ Panel ręcznie definiowanych terminów (/terminy) widocznych w linku zapisu
 - ✅ Testy: 28/28 backend + frontend 100%
 
+### 2026-06-20 (iter. 4)
+- ✅ Logowanie/rejestracja gabinetu (JWT, bcrypt, brute-force lock 5/15min), izolacja danych per gabinet (`tenant.py`, `auth.py`)
+- ✅ Migracja starych danych demo do gabinetu admina; cron iteruje po wszystkich gabinetach
+- ✅ Własna domena nadawcy email per gabinet: klucz Resend (maskowany), adres nadawcy, reply-to, test-email, instrukcja weryfikacji DNS
+- ✅ SMS 24h przed wizytą (szablon `sms_24h`, cron + ręczny trigger `/appointments/send-24h-reminders`, badge w Wiadomościach)
+- ✅ Testy: 25/25 backend + frontend flows (iteration_4)
+
 ## Backlog / Remaining
-- P0: Poprawne klucze Twilio (Account SID AC..., Auth Token, numer nadawcy E.164) → włączenie realnego SMS
-- P1: Uwierzytelnianie + multi-tenant (wiele gabinetów), gating write-endpointów
-- P1: Własna zweryfikowana domena nadawcy w Resend (EMAIL_REPLY_TO / from domeny gabinetu)
+- P0: Realny SMS — użytkownik odrzucił Twilio (koszt ~20$); rozważyć tańszą polską bramkę (SMSAPI, SerwerSMS) — SMS pozostaje MOCK
+- P2: Reset hasła (forgot/reset-password) + zaproszenia pracowników do gabinetu
 - P2: Walidacja slotów po stronie API (format HH:MM, data >= dziś), sprawdzanie istnienia slotu przy reczne_terminy
 - P2: Refactor server.py (1151 linii) na routery/serwisy
 - P2: Integracja API z systemami gabinetowymi (SmartDental, Dentidesk, Medfile)
 - P2: Zarządzanie zgodami RODO + umowa powierzenia
 
 ## Next Tasks
-- Uzupełnić poprawne klucze Twilio i przełączyć SMS na REALNY
-- Dodać uwierzytelnianie i izolację danych per gabinet
-- Zweryfikowana domena email nadawcy
+- Polska bramka SMS (SMSAPI/SerwerSMS) jako alternatywa dla Twilio
+- Reset hasła emailem
+- Walidacja slotów po stronie API
