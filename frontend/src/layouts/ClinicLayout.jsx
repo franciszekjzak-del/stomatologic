@@ -2,9 +2,10 @@ import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useEffect, useState } from "react";
 import {
   LayoutDashboard, Users, Upload, Clock, MessageSquareText,
-  TrendingUp, Inbox, Settings, Stethoscope, Play, RotateCcw, CalendarClock,
+  TrendingUp, Inbox, Settings, Stethoscope, Play, RotateCcw, CalendarClock, LogOut,
 } from "lucide-react";
 import { api } from "@/lib/api";
+import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 
@@ -23,19 +24,25 @@ const NAV = [
 export default function ClinicLayout() {
   const [clinic, setClinic] = useState({ nazwa_gabinetu: "", plan: "" });
   const navigate = useNavigate();
+  const { user, logout } = useAuth();
 
   const load = () => api.get("/settings").then((r) => setClinic(r.data)).catch(() => {});
   useEffect(() => { load(); }, []);
 
   const runScan = async () => {
     const r = await api.post("/recall/run");
-    toast.success(`Skanowanie zakończone — ${r.data.marked_due} nowych pacjentów do przypomnienia`);
+    toast.success(`Skanowanie zakończone — ${r.data.marked_due} nowych pacjentów do przypomnienia, ${r.data.przypomnienia_24h || 0} SMS 24h`);
   };
 
   const resetDemo = async () => {
     await api.post("/admin/reset-demo");
     toast.success("Dane demonstracyjne zresetowane");
     navigate(0);
+  };
+
+  const doLogout = async () => {
+    await logout();
+    navigate("/logowanie", { replace: true });
   };
 
   return (
@@ -81,6 +88,15 @@ export default function ClinicLayout() {
             className="w-full justify-start gap-2 text-muted-foreground">
             <RotateCcw className="h-4 w-4" /> Reset demo
           </Button>
+          <div className="pt-2 mt-1 border-t border-border flex items-center gap-2">
+            <div className="flex-1 min-w-0">
+              <div className="text-xs font-medium truncate" data-testid="user-email">{user?.email}</div>
+              <div className="text-[11px] text-muted-foreground">Właściciel gabinetu</div>
+            </div>
+            <Button data-testid="logout-btn" onClick={doLogout} variant="ghost" size="icon" title="Wyloguj" className="h-8 w-8 text-muted-foreground">
+              <LogOut className="h-4 w-4" />
+            </Button>
+          </div>
         </div>
       </aside>
 

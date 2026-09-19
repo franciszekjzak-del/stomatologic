@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { api } from "@/lib/api";
+import { api, apiError } from "@/lib/api";
+import EmailSenderCard from "@/components/EmailSenderCard";
 import { PageHeader } from "@/components/Shared";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -17,11 +18,19 @@ export default function ClinicSettings() {
   useEffect(() => { api.get("/settings").then((r) => setS(r.data)); }, []);
 
   const save = async () => {
-    await api.put("/settings", {
+    const payload = {
       nazwa_gabinetu: s.nazwa_gabinetu, adres: s.adres, telefon: s.telefon,
       logo_url: s.logo_url, godzina_od: Number(s.godzina_od), godzina_do: Number(s.godzina_do), plan: s.plan,
-    });
-    toast.success("Zapisano ustawienia gabinetu");
+      email_nadawca: (s.email_nadawca || "").trim(), email_reply_to: (s.email_reply_to || "").trim(),
+    };
+    if (s.resend_api_key && s.resend_api_key.trim()) payload.resend_api_key = s.resend_api_key.trim();
+    try {
+      const r = await api.put("/settings", payload);
+      setS({ ...r.data, resend_api_key: "" });
+      toast.success("Zapisano ustawienia gabinetu");
+    } catch (e) {
+      toast.error(apiError(e));
+    }
   };
 
   if (!s) return null;
@@ -82,6 +91,8 @@ export default function ClinicSettings() {
             </Select>
           </div>
         </Card>
+
+        <EmailSenderCard s={s} setS={setS} />
       </div>
     </div>
   );

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Header, BackgroundTasks
+from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Header, BackgroundTasks, Depends
 from fastapi.responses import Response
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -21,10 +21,16 @@ load_dotenv(ROOT_DIR / '.env')
 
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+raw_db = client[os.environ['DB_NAME']]
+
+from tenant import TenantDB, set_clinic, get_clinic
+import auth
+
+db = TenantDB(raw_db)
 
 app = FastAPI()
-api_router = APIRouter(prefix="/api")
+public_router = APIRouter(prefix="/api")
+api_router = APIRouter(prefix="/api", dependencies=[Depends(auth.require_clinic)])
 
 
 def now_utc() -> datetime:
@@ -124,18 +130,32 @@ def _email_html(patient: dict, body_text: str, link: str, clinic: str) -> str:
     )
 
 
-async def send_email_reminder(to: str, subject: str, html: str) -> dict:
-    """Send email via Emergent-managed proxy; MOCK when key absent or on failure."""
+async def send_email_reminder(to: str, subject: str, html: str, settings: Optional[dict] = None) -> dict:
+    """Send email: own Resend domain (clinic settings) if configured, else Emergent-managed proxy; MOCK fallback."""
     if not to:
         return {"status": "BLAD", "mock": not email_configured(), "error": "brak adresu email"}
-    if not email_configured():
-        return {"status": "WYSLANO", "mock": True, "error": None}
-    payload = {"to": [to], "subject": subject, "html": html,
-               "from_name": os.environ.get("EMAIL_FROM_NAME", "RecallDent")}
-    reply_to = os.environ.get("EMAIL_REPLY_TO")
-    if reply_to:
-        payload["contact_email"] = reply_to
+    settings = settings or {}
+    own_key = (settings.get("resend_api_key") or "").strip()
+    own_from = (settings.get("email_nadawca") or "").strip()
+    from_name = settings.get("nazwa_gabinetu") or os.environ.get("EMAIL_FROM_NAME", "RecallDent")
+    reply_to = (settings.get("email_reply_to") or os.environ.get("EMAIL_REPLY_TO") or "").strip()
     try:
+        if own_key and own_from:
+            payload = {"from": f"{from_name} <{own_from}>", "to": [to], "subject": subject, "html": html}
+            if reply_to:
+                payload["reply_to"] = reply_to
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post("https://api.resend.com/emails",
+                                         headers={"Authorization": f"Bearer {own_key}"}, json=payload)
+            if resp.status_code >= 400:
+                detail = resp.json().get("message", resp.text) if resp.headers.get("content-type", "").startswith("application/json") else resp.text
+                return {"status": "BLAD", "mock": False, "error": f"Resend: {detail}", "provider": "resend_own"}
+            return {"status": "WYSLANO", "mock": False, "error": None, "id": resp.json().get("id"), "provider": "resend_own"}
+        if not email_configured():
+            return {"status": "WYSLANO", "mock": True, "error": None}
+        payload = {"to": [to], "subject": subject, "html": html, "from_name": from_name}
+        if reply_to:
+            payload["contact_email"] = reply_to
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
                 f"{EMAIL_BASE_URL}/api/v1/email/send",
@@ -143,7 +163,7 @@ async def send_email_reminder(to: str, subject: str, html: str) -> dict:
                 json=payload,
             )
         resp.raise_for_status()
-        return {"status": "WYSLANO", "mock": False, "error": None, "id": resp.json().get("id")}
+        return {"status": "WYSLANO", "mock": False, "error": None, "id": resp.json().get("id"), "provider": "emergent"}
     except Exception as e:
         logging.getLogger(__name__).error("Email send error: %s", e)
         return {"status": "BLAD", "mock": False, "error": str(e)}
@@ -234,12 +254,16 @@ DEFAULT_SETTINGS = {
     "godzina_od": 10,
     "godzina_do": 18,
     "plan": "Rozszerzony",
+    "email_nadawca": "",
+    "resend_api_key": "",
+    "email_reply_to": "",
 }
 
 DEFAULT_TEMPLATES = {
     "sms": "Pacjent {imie}, minęło {interwal} od ostatniej wizyty ({procedura}). Zarezerwuj wizytę kontrolną: {link_do_zapisu} — {nazwa_gabinetu}",
     "email_temat": "Czas na wizytę kontrolną w {nazwa_gabinetu}",
     "email": "Dzień dobry {imie} {nazwisko},\n\nminęło {interwal} od Twojej ostatniej wizyty ({procedura}). Zapraszamy na wizytę kontrolną.\n\nZarezerwuj termin online: {link_do_zapisu}\n\nPozdrawiamy,\n{nazwa_gabinetu}",
+    "sms_24h": "Przypominamy: jutro {data_wizyty} o {godzina_wizyty} masz wizytę w {nazwa_gabinetu}, {adres}. W razie zmiany planów prosimy o kontakt: {telefon_gabinetu}.",
 }
 
 IMIONA_M = ["Jan", "Piotr", "Andrzej", "Tomasz", "Marcin", "Michał", "Krzysztof", "Paweł", "Adam", "Jakub"]
@@ -248,14 +272,20 @@ NAZWISKA = ["Nowak", "Kowalski", "Wiśniewski", "Wójcik", "Kowalczyk", "Kamińs
             "Szymański", "Woźniak", "Dąbrowski", "Kozłowski", "Jankowski", "Mazur", "Kwiatkowski"]
 
 
-async def seed_if_empty():
+async def seed_if_empty(demo: bool = True, nazwa: Optional[str] = None):
+    """Seed defaults for the clinic in the current tenant context."""
     if await db.procedures.count_documents({}) == 0:
         await db.procedures.insert_many([dict(p) for p in DEFAULT_PROCEDURES])
     if await db.settings.count_documents({}) == 0:
-        await db.settings.insert_one(dict(DEFAULT_SETTINGS))
+        s = dict(DEFAULT_SETTINGS)
+        if nazwa:
+            s["nazwa_gabinetu"] = nazwa
+            s["adres"] = ""
+            s["telefon"] = ""
+        await db.settings.insert_one(s)
     if await db.templates.count_documents({}) == 0:
         await db.templates.insert_one(dict(DEFAULT_TEMPLATES))
-    if await db.patients.count_documents({}) == 0:
+    if demo and await db.patients.count_documents({}) == 0:
         procs = await db.procedures.find({}).to_list(100)
         patients = []
         for i in range(32):
@@ -377,7 +407,7 @@ async def _send_reminder(patient: dict, channel: str = "SMS", historical: bool =
         subject = render_template(templates.get("email_temat", DEFAULT_TEMPLATES["email_temat"]),
                                   patient, proc, settings, link)
         html = _email_html(patient, tresc, link, clinic)
-        res = await send_email_reminder(patient.get("email", ""), subject, html)
+        res = await send_email_reminder(patient.get("email", ""), subject, html, settings)
         status, is_mock, err = res["status"], res["mock"], res.get("error")
 
     # Determine sequence step for this reminder
@@ -483,16 +513,86 @@ async def advance_sequences() -> dict:
 
 
 async def run_daily_recall() -> dict:
-    """Full nightly job: scan for overdue patients, then advance the reminder sequence."""
+    """Full nightly job for the clinic in context: scan, advance sequence, 24h visit reminders."""
     marked = await run_recall_scan()
     seq = await advance_sequences()
-    return {"marked_due": marked, **seq}
+    r24 = await send_24h_reminders()
+    return {"marked_due": marked, **seq, "przypomnienia_24h": r24}
+
+
+def render_24h(tpl: str, patient: dict, appt: dict, settings: dict) -> str:
+    try:
+        when = datetime.fromisoformat(appt["data_wizyty"])
+        data_s, godz_s = when.strftime("%d.%m.%Y"), when.strftime("%H:%M")
+    except Exception:
+        data_s, godz_s = appt.get("data_wizyty", ""), ""
+    return (tpl
+            .replace("{imie}", patient.get("imie", ""))
+            .replace("{nazwisko}", patient.get("nazwisko", ""))
+            .replace("{data_wizyty}", data_s)
+            .replace("{godzina_wizyty}", godz_s)
+            .replace("{nazwa_gabinetu}", settings.get("nazwa_gabinetu", ""))
+            .replace("{adres}", settings.get("adres", ""))
+            .replace("{telefon_gabinetu}", settings.get("telefon", "")))
+
+
+async def send_24h_reminders() -> int:
+    """SMS to every patient with a planned visit within the next 24-48h window (sent once per visit)."""
+    settings = await db.settings.find_one({}) or DEFAULT_SETTINGS
+    templates = await db.templates.find_one({}) or DEFAULT_TEMPLATES
+    tpl = templates.get("sms_24h") or DEFAULT_TEMPLATES["sms_24h"]
+    now = now_utc()
+    lo, hi = iso(now), iso(now + timedelta(hours=48))
+    sent = 0
+    async for a in db.appointments.find({"status": "ZAPLANOWANA", "przypomnienie_24h": {"$ne": True},
+                                         "data_wizyty": {"$gte": lo, "$lte": hi}}):
+        try:
+            p = await db.patients.find_one({"_id": ObjectId(a["pacjent_id"])})
+        except Exception:
+            p = None
+        if not p or not p.get("telefon"):
+            continue
+        tresc = render_24h(tpl, p, a, settings)
+        res = send_sms(p["telefon"], tresc)
+        await db.reminders.insert_one({
+            "pacjent_id": a["pacjent_id"],
+            "pacjent_imie": f"{p.get('imie','')} {p.get('nazwisko','')}",
+            "typ": "SMS",
+            "rodzaj": "PRZYPOMNIENIE_24H",
+            "odbiorca": p["telefon"],
+            "tresc": tresc,
+            "status": res["status"],
+            "mock": res["mock"],
+            "blad": res.get("error"),
+            "krok_sekwencji": None,
+            "data_wyslania": iso(now),
+            "data_dostarczenia": iso(now + timedelta(seconds=5)) if res["status"] == "WYSLANO" else None,
+        })
+        await db.appointments.update_one({"_id": a["_id"]},
+                                         {"$set": {"przypomnienie_24h": True, "przypomnienie_24h_data": iso(now)}})
+        sent += 1
+    return sent
+
+
+async def run_daily_recall_all_clinics() -> dict:
+    """Cron entrypoint: run the daily job for every registered clinic."""
+    summary = {}
+    async for c in raw_db.clinics.find({}):
+        cid = str(c["_id"])
+        set_clinic(cid)
+        try:
+            summary[cid] = await run_daily_recall()
+        except Exception as e:
+            logging.getLogger(__name__).error("Daily recall failed for clinic %s: %s", cid, e)
+            summary[cid] = {"error": str(e)}
+    set_clinic(None)
+    return summary
 
 
 # ---------------------------------------------------------------------------
 # Routes: dashboard
 # ---------------------------------------------------------------------------
-@api_router.get("/")
+@public_router.get("/")
 async def root():
     return {"message": "Recall API"}
 
@@ -745,22 +845,38 @@ async def update_templates(payload: dict):
     return clean(await db.templates.find_one({}))
 
 
+def _mask_settings(s: dict) -> dict:
+    s = clean(dict(s))
+    key = s.pop("resend_api_key", "") or ""
+    s.pop("clinic_id", None)
+    s["resend_api_key_ustawiony"] = bool(key.strip())
+    s["resend_api_key_podglad"] = f"{key[:6]}…{key[-4:]}" if len(key) > 10 else ""
+    return s
+
+
 @api_router.get("/settings")
 async def get_settings():
     s = await db.settings.find_one({})
-    return clean(s) if s else DEFAULT_SETTINGS
+    return _mask_settings(s if s else DEFAULT_SETTINGS)
 
 
 @api_router.put("/settings")
 async def update_settings(payload: dict):
     payload.pop("id", None)
     payload.pop("_id", None)
+    payload.pop("clinic_id", None)
+    payload.pop("resend_api_key_ustawiony", None)
+    payload.pop("resend_api_key_podglad", None)
+    if "resend_api_key" in payload and payload["resend_api_key"] is None:
+        payload.pop("resend_api_key")
+    if payload.get("email_nadawca") and not EMAIL_RE.match(payload["email_nadawca"].strip()):
+        raise HTTPException(400, "Nieprawidłowy adres nadawcy")
     existing = await db.settings.find_one({})
     if existing:
         await db.settings.update_one({"_id": existing["_id"]}, {"$set": payload})
     else:
         await db.settings.insert_one(payload)
-    return clean(await db.settings.find_one({}))
+    return _mask_settings(await db.settings.find_one({}))
 
 
 # ---------------------------------------------------------------------------
@@ -791,14 +907,26 @@ def _cron_authorized(authorization: Optional[str]) -> bool:
     return hmac.compare_digest(parts[1], secret)
 
 
-@api_router.post("/cron/recall-sequence")
+@public_router.post("/cron/recall-sequence")
 async def cron_recall_sequence(background_tasks: BackgroundTasks,
                                authorization: Optional[str] = Header(default=None)):
     # Cron endpoints must ack 2xx immediately; enqueue/background the actual work.
     if not _cron_authorized(authorization):
         raise HTTPException(status_code=401, detail="Unauthorized")
-    background_tasks.add_task(run_daily_recall)
+    background_tasks.add_task(run_daily_recall_all_clinics)
     return {"accepted": True}
+
+
+@api_router.post("/appointments/send-24h-reminders")
+async def trigger_24h_reminders():
+    return {"wyslano": await send_24h_reminders()}
+
+
+@api_router.get("/appointments/upcoming")
+async def upcoming_appointments():
+    now = iso(now_utc())
+    docs = await db.appointments.find({"status": "ZAPLANOWANA", "data_wizyty": {"$gte": now}}).sort("data_wizyty", 1).to_list(500)
+    return [clean(d) for d in docs]
 
 
 # ---------------------------------------------------------------------------
@@ -932,12 +1060,34 @@ async def roi_pdf():
 
 @api_router.get("/sms-status")
 async def sms_status():
+    settings = await db.settings.find_one({}) or {}
+    own = bool((settings.get("resend_api_key") or "").strip() and (settings.get("email_nadawca") or "").strip())
     return {"skonfigurowane": twilio_configured(),
             "tryb": "REALNY" if twilio_configured() else "MOCK",
             "provider": "Twilio",
-            "email_skonfigurowane": email_configured(),
-            "email_tryb": "REALNY" if email_configured() else "MOCK",
-            "email_provider": "Resend"}
+            "email_skonfigurowane": own or email_configured(),
+            "email_tryb": "REALNY" if (own or email_configured()) else "MOCK",
+            "email_provider": "Resend",
+            "email_wlasna_domena": own,
+            "email_nadawca": settings.get("email_nadawca") if own else None}
+
+
+class TestEmailIn(BaseModel):
+    do: str
+
+
+@api_router.post("/settings/test-email")
+async def settings_test_email(payload: TestEmailIn):
+    settings = await db.settings.find_one({}) or DEFAULT_SETTINGS
+    if not EMAIL_RE.match(payload.do.strip()):
+        raise HTTPException(400, "Nieprawidłowy adres email")
+    clinic = settings.get("nazwa_gabinetu", "")
+    html = _email_html({}, f"To jest testowa wiadomość z systemu RecallDent dla gabinetu {clinic}. "
+                       "Jeśli ją widzisz, konfiguracja nadawcy działa poprawnie.", app_base_url() or "#", clinic)
+    res = await send_email_reminder(payload.do.strip(), f"Test konfiguracji email — {clinic}", html, settings)
+    if res["status"] != "WYSLANO":
+        raise HTTPException(400, res.get("error") or "Wysyłka nie powiodła się")
+    return {"ok": True, "mock": res["mock"], "provider": res.get("provider")}
 
 
 SEQ_STEP_LABEL = {
@@ -1042,14 +1192,28 @@ async def delete_slot(sid: str):
     return {"ok": True}
 
 
-@api_router.get("/booking/{pid}")
-async def booking_info(pid: str):
+def _public_settings(s: dict) -> dict:
+    s = clean(dict(s))
+    for k in ("resend_api_key", "email_reply_to", "clinic_id", "plan"):
+        s.pop(k, None)
+    return s
+
+
+async def _public_patient(pid: str) -> dict:
+    """Resolve a patient from a public link and bind the tenant context to their clinic."""
     try:
-        p = await db.patients.find_one({"_id": ObjectId(pid)})
+        p = await raw_db.patients.find_one({"_id": ObjectId(pid)})
     except Exception:
-        raise HTTPException(404, "Nie znaleziono")
+        p = None
     if not p:
         raise HTTPException(404, "Nie znaleziono")
+    set_clinic(p.get("clinic_id"))
+    return p
+
+
+@public_router.get("/booking/{pid}")
+async def booking_info(pid: str):
+    p = await _public_patient(pid)
     settings = await db.settings.find_one({}) or DEFAULT_SETTINGS
     procs = {x["nazwa"]: x for x in await db.procedures.find({}).to_list(100)}
     proc = procs.get(p.get("typ_ostatniej_procedury"))
@@ -1061,7 +1225,7 @@ async def booking_info(pid: str):
         "procedura": p.get("typ_ostatniej_procedury"),
         "interwal": interval_label(proc["interwal_miesiace"]) if proc else "6 miesięcy",
         "status": p.get("status_recallu"),
-        "gabinet": clean(settings),
+        "gabinet": _public_settings(settings),
         "sloty": sloty,
         "reczne_terminy": bool(clinic_slots),
         "istniejaca_wizyta": clean(existing) if existing else None,
@@ -1073,11 +1237,9 @@ class BookingConfirm(BaseModel):
     godzina: str
 
 
-@api_router.post("/booking/{pid}/confirm")
+@public_router.post("/booking/{pid}/confirm")
 async def booking_confirm(pid: str, payload: BookingConfirm):
-    p = await db.patients.find_one({"_id": ObjectId(pid)})
-    if not p:
-        raise HTTPException(404, "Nie znaleziono")
+    p = await _public_patient(pid)
     when = datetime.fromisoformat(f"{payload.data}T{payload.godzina}:00+00:00")
     appt = await _create_appointment(p, when=when, source="ONLINE")
     settings = await db.settings.find_one({}) or DEFAULT_SETTINGS
@@ -1101,14 +1263,12 @@ async def booking_confirm(pid: str, payload: BookingConfirm):
         "data_wyslania": iso(now_utc()),
         "data_dostarczenia": iso(now_utc()) if res["status"] == "WYSLANO" else None,
     })
-    return {"ok": True, "wizyta": clean(appt), "gabinet": clean(settings)}
+    return {"ok": True, "wizyta": clean(appt), "gabinet": _public_settings(settings)}
 
 
-@api_router.post("/booking/{pid}/reject")
+@public_router.post("/booking/{pid}/reject")
 async def booking_reject(pid: str):
-    p = await db.patients.find_one({"_id": ObjectId(pid)})
-    if not p:
-        raise HTTPException(404, "Nie znaleziono")
+    await _public_patient(pid)
     await db.patients.update_one({"_id": ObjectId(pid)},
                                  {"$set": {"status_recallu": STATUS_REJECTED, "zaktualizowano": iso(now_utc())}})
     return {"ok": True}
@@ -1121,10 +1281,38 @@ async def booking_reject(pid: str):
 async def reset_demo():
     for c in ["patients", "procedures", "settings", "templates", "reminders", "appointments", "slots"]:
         await db[c].delete_many({})
-    await seed_if_empty()
+    await seed_if_empty(demo=True)
     return {"ok": True}
 
 
+@api_router.post("/admin/load-demo")
+async def load_demo():
+    await seed_if_empty(demo=True)
+    return {"ok": True}
+
+
+async def _seed_new_clinic(cid: str, demo: bool, nazwa: str):
+    token = set_clinic(cid)
+    try:
+        await seed_if_empty(demo=demo, nazwa=nazwa)
+    finally:
+        set_clinic(None)
+
+
+async def _migrate_orphans(cid: str):
+    """Assign pre-auth documents (no clinic_id) to the admin clinic."""
+    for c in ["patients", "procedures", "settings", "templates", "reminders", "appointments", "slots"]:
+        await raw_db[c].update_many({"clinic_id": {"$exists": False}}, {"$set": {"clinic_id": cid}})
+    set_clinic(cid)
+    try:
+        await seed_if_empty(demo=True)
+    finally:
+        set_clinic(None)
+
+
+auth.init(raw_db, _seed_new_clinic)
+app.include_router(auth.router)
+app.include_router(public_router)
 app.include_router(api_router)
 
 app.add_middleware(
@@ -1142,7 +1330,8 @@ logger = logging.getLogger(__name__)
 
 @app.on_event("startup")
 async def startup():
-    await seed_if_empty()
+    await auth.ensure_indexes()
+    await auth.seed_admin(_migrate_orphans)
 
 
 @app.on_event("shutdown")
