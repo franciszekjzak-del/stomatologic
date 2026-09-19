@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, zl } from "@/lib/api";
 import { PageHeader } from "@/components/Shared";
+import ReadOnlyBanner from "@/components/ReadOnlyBanner";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -44,6 +45,7 @@ export default function RecallSettings() {
     <div data-testid="recall-settings-page">
       <PageHeader title="Ustawienia recallu" subtitle="Zdefiniuj interwał przypomnień i szacunkową wartość dla każdej procedury" />
 
+      <ReadOnlyBanner />
       <Card className="shadow-none divide-y divide-border">
         {procs.map((p) => (
           <div key={p.id} data-testid={`procedure-${p.id}`} className="p-5 flex flex-col md:flex-row md:items-center gap-4">

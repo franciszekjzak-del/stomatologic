@@ -1,4 +1,5 @@
 import axios from "axios";
+import { toast } from "sonner";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 export const API = `${BACKEND_URL}/api`;
@@ -15,6 +16,9 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (r) => r,
   (err) => {
+    if (err.response?.status === 403) {
+      toast.error(typeof err.response.data?.detail === "string" ? err.response.data.detail : "Brak uprawnień");
+    }
     if (err.response?.status === 401 && !err.config?.url?.startsWith("/auth/")) {
       localStorage.removeItem(TOKEN_KEY);
       if (!window.location.pathname.startsWith("/logowanie")) window.location.assign("/logowanie");

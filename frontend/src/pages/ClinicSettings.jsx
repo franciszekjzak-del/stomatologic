@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, apiError } from "@/lib/api";
 import EmailSenderCard from "@/components/EmailSenderCard";
 import { PageHeader } from "@/components/Shared";
+import ReadOnlyBanner, { useIsOwner } from "@/components/ReadOnlyBanner";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -14,6 +15,7 @@ import { toast } from "sonner";
 
 export default function ClinicSettings() {
   const [s, setS] = useState(null);
+  const isOwner = useIsOwner();
 
   useEffect(() => { api.get("/settings").then((r) => setS(r.data)); }, []);
 
@@ -41,9 +43,10 @@ export default function ClinicSettings() {
       <PageHeader
         title="Ustawienia gabinetu"
         subtitle="Dane gabinetu, godziny wysyłki i plan subskrypcji"
-        action={<Button data-testid="save-settings-btn" onClick={save} className="gap-2"><Save className="h-4 w-4" /> Zapisz</Button>}
+        action={isOwner && <Button data-testid="save-settings-btn" onClick={save} className="gap-2"><Save className="h-4 w-4" /> Zapisz</Button>}
       />
 
+      <ReadOnlyBanner />
       <div className="grid lg:grid-cols-2 gap-4">
         <Card className="shadow-none p-6">
           <div className="flex items-center gap-2 mb-4">

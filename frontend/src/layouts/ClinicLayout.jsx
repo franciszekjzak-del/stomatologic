@@ -2,7 +2,7 @@ import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useEffect, useState } from "react";
 import {
   LayoutDashboard, Users, Upload, Clock, MessageSquareText,
-  TrendingUp, Inbox, Settings, Stethoscope, Play, RotateCcw, CalendarClock, LogOut,
+  TrendingUp, Inbox, Settings, Stethoscope, Play, RotateCcw, CalendarClock, LogOut, CalendarCheck, UsersRound,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
@@ -13,12 +13,14 @@ const NAV = [
   { to: "/panel", label: "Dashboard", icon: LayoutDashboard, id: "dashboard" },
   { to: "/pacjenci", label: "Lista pacjentów", icon: Users, id: "patients" },
   { to: "/import", label: "Import danych", icon: Upload, id: "import" },
+  { to: "/wizyty", label: "Nadchodzące wizyty", icon: CalendarCheck, id: "appointments" },
   { to: "/terminy", label: "Dostępne terminy", icon: CalendarClock, id: "slots" },
   { to: "/ustawienia-recallu", label: "Ustawienia recallu", icon: Clock, id: "recall" },
   { to: "/szablony", label: "Szablony wiadomości", icon: MessageSquareText, id: "templates" },
   { to: "/wiadomosci", label: "Wysłane wiadomości", icon: Inbox, id: "messages" },
   { to: "/raport-roi", label: "Raport ROI", icon: TrendingUp, id: "roi" },
   { to: "/ustawienia", label: "Ustawienia gabinetu", icon: Settings, id: "settings" },
+  { to: "/zespol", label: "Zespół gabinetu", icon: UsersRound, id: "team", ownerOnly: true },
 ];
 
 export default function ClinicLayout() {
@@ -61,7 +63,7 @@ export default function ClinicLayout() {
         </div>
 
         <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
-          {NAV.map((n) => (
+          {NAV.filter((n) => !n.ownerOnly || user?.rola === "owner").map((n) => (
             <NavLink
               key={n.to}
               to={n.to}
@@ -84,14 +86,16 @@ export default function ClinicLayout() {
           <Button data-testid="run-scan-btn" onClick={runScan} className="w-full justify-start gap-2" size="sm">
             <Play className="h-4 w-4" /> Uruchom skanowanie
           </Button>
-          <Button data-testid="reset-demo-btn" onClick={resetDemo} variant="ghost" size="sm"
-            className="w-full justify-start gap-2 text-muted-foreground">
-            <RotateCcw className="h-4 w-4" /> Reset demo
-          </Button>
+          {user?.rola === "owner" && (
+            <Button data-testid="reset-demo-btn" onClick={resetDemo} variant="ghost" size="sm"
+              className="w-full justify-start gap-2 text-muted-foreground">
+              <RotateCcw className="h-4 w-4" /> Reset demo
+            </Button>
+          )}
           <div className="pt-2 mt-1 border-t border-border flex items-center gap-2">
             <div className="flex-1 min-w-0">
               <div className="text-xs font-medium truncate" data-testid="user-email">{user?.email}</div>
-              <div className="text-[11px] text-muted-foreground">Właściciel gabinetu</div>
+              <div className="text-[11px] text-muted-foreground" data-testid="user-role">{user?.rola === "owner" ? "Właściciel gabinetu" : "Recepcja"}</div>
             </div>
             <Button data-testid="logout-btn" onClick={doLogout} variant="ghost" size="icon" title="Wyloguj" className="h-8 w-8 text-muted-foreground">
               <LogOut className="h-4 w-4" />

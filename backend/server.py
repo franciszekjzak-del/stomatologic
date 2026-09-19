@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Header, BackgroundTasks, Depends
+from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Header, BackgroundTasks, Depends, Form
 from fastapi.responses import Response
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -104,6 +104,11 @@ def app_base_url() -> str:
 def booking_link(pid: str) -> str:
     base = app_base_url()
     return f"{base}/zapis/{pid}" if base else f"/zapis/{pid}"
+
+
+def confirm_link(aid: str) -> str:
+    base = app_base_url()
+    return f"{base}/potwierdz/{aid}" if base else f"/potwierdz/{aid}"
 
 
 def _email_html(patient: dict, body_text: str, link: str, clinic: str) -> str:
@@ -263,7 +268,7 @@ DEFAULT_TEMPLATES = {
     "sms": "Pacjent {imie}, minęło {interwal} od ostatniej wizyty ({procedura}). Zarezerwuj wizytę kontrolną: {link_do_zapisu} — {nazwa_gabinetu}",
     "email_temat": "Czas na wizytę kontrolną w {nazwa_gabinetu}",
     "email": "Dzień dobry {imie} {nazwisko},\n\nminęło {interwal} od Twojej ostatniej wizyty ({procedura}). Zapraszamy na wizytę kontrolną.\n\nZarezerwuj termin online: {link_do_zapisu}\n\nPozdrawiamy,\n{nazwa_gabinetu}",
-    "sms_24h": "Przypominamy: jutro {data_wizyty} o {godzina_wizyty} masz wizytę w {nazwa_gabinetu}, {adres}. W razie zmiany planów prosimy o kontakt: {telefon_gabinetu}.",
+    "sms_24h": "Przypominamy: jutro {data_wizyty} o {godzina_wizyty} masz wizytę w {nazwa_gabinetu}, {adres}. Odpowiedz TAK aby potwierdzić lub NIE aby odwołać: {link_potwierdzenia}",
 }
 
 IMIONA_M = ["Jan", "Piotr", "Andrzej", "Tomasz", "Marcin", "Michał", "Krzysztof", "Paweł", "Adam", "Jakub"]
@@ -531,6 +536,7 @@ def render_24h(tpl: str, patient: dict, appt: dict, settings: dict) -> str:
             .replace("{nazwisko}", patient.get("nazwisko", ""))
             .replace("{data_wizyty}", data_s)
             .replace("{godzina_wizyty}", godz_s)
+            .replace("{link_potwierdzenia}", confirm_link(str(appt["_id"])))
             .replace("{nazwa_gabinetu}", settings.get("nazwa_gabinetu", ""))
             .replace("{adres}", settings.get("adres", ""))
             .replace("{telefon_gabinetu}", settings.get("telefon", "")))
@@ -659,7 +665,7 @@ async def update_patient(pid: str, upd: PatientUpdate):
     return clean(await db.patients.find_one({"_id": ObjectId(pid)}))
 
 
-@api_router.delete("/patients/{pid}")
+@api_router.delete("/patients/{pid}", dependencies=[Depends(auth.require_owner)])
 async def delete_patient(pid: str):
     await db.patients.delete_one({"_id": ObjectId(pid)})
     return {"ok": True}
@@ -804,13 +810,13 @@ async def list_procedures():
     return [clean(d) for d in docs]
 
 
-@api_router.post("/procedures")
+@api_router.post("/procedures", dependencies=[Depends(auth.require_owner)])
 async def create_procedure(p: Procedure):
     res = await db.procedures.insert_one(p.model_dump())
     return clean(await db.procedures.find_one({"_id": res.inserted_id}))
 
 
-@api_router.put("/procedures/{pid}")
+@api_router.put("/procedures/{pid}", dependencies=[Depends(auth.require_owner)])
 async def update_procedure(pid: str, upd: ProcedureUpdate):
     data = {k: v for k, v in upd.model_dump().items() if v is not None}
     await db.procedures.update_one({"_id": ObjectId(pid)}, {"$set": data})
@@ -818,7 +824,7 @@ async def update_procedure(pid: str, upd: ProcedureUpdate):
     return clean(await db.procedures.find_one({"_id": ObjectId(pid)}))
 
 
-@api_router.delete("/procedures/{pid}")
+@api_router.delete("/procedures/{pid}", dependencies=[Depends(auth.require_owner)])
 async def delete_procedure(pid: str):
     await db.procedures.delete_one({"_id": ObjectId(pid)})
     return {"ok": True}
@@ -833,7 +839,7 @@ async def get_templates():
     return clean(t) if t else DEFAULT_TEMPLATES
 
 
-@api_router.put("/templates")
+@api_router.put("/templates", dependencies=[Depends(auth.require_owner)])
 async def update_templates(payload: dict):
     payload.pop("id", None)
     payload.pop("_id", None)
@@ -860,7 +866,7 @@ async def get_settings():
     return _mask_settings(s if s else DEFAULT_SETTINGS)
 
 
-@api_router.put("/settings")
+@api_router.put("/settings", dependencies=[Depends(auth.require_owner)])
 async def update_settings(payload: dict):
     payload.pop("id", None)
     payload.pop("_id", None)
@@ -924,9 +930,116 @@ async def trigger_24h_reminders():
 
 @api_router.get("/appointments/upcoming")
 async def upcoming_appointments():
+    now = iso(now_utc() - timedelta(hours=12))
+    docs = await db.appointments.find({"status": {"$in": ["ZAPLANOWANA", "ODWOLANA"]}, "data_wizyty": {"$gte": now}}).sort("data_wizyty", 1).to_list(500)
+    out = []
+    for d in docs:
+        try:
+            p = await db.patients.find_one({"_id": ObjectId(d["pacjent_id"])})
+        except Exception:
+            p = None
+        c = clean(d)
+        c["telefon"] = (p or {}).get("telefon", "")
+        c["link_potwierdzenia"] = confirm_link(c["id"])
+        out.append(c)
+    return out
+
+
+def _normalize_phone(s: str) -> str:
+    digits = re.sub(r"\D", "", s or "")
+    return digits[-9:] if len(digits) >= 9 else digits
+
+
+def _parse_reply(body: str) -> Optional[str]:
+    t = (body or "").strip().lower()
+    if re.match(r"^(tak|t|yes|ok|potwierdzam)\b", t):
+        return "TAK"
+    if re.match(r"^(nie|n|no|odwo)", t):
+        return "NIE"
+    return None
+
+
+async def _apply_reply(appt: dict, answer: str, source: str) -> dict:
     now = iso(now_utc())
-    docs = await db.appointments.find({"status": "ZAPLANOWANA", "data_wizyty": {"$gte": now}}).sort("data_wizyty", 1).to_list(500)
-    return [clean(d) for d in docs]
+    if answer == "TAK":
+        upd = {"potwierdzona": True, "status": "ZAPLANOWANA", "potwierdzenie_data": now, "potwierdzenie_zrodlo": source}
+    else:
+        upd = {"potwierdzona": False, "status": "ODWOLANA", "potwierdzenie_data": now, "potwierdzenie_zrodlo": source}
+    await raw_db.appointments.update_one({"_id": appt["_id"]}, {"$set": upd})
+    if answer == "NIE":
+        await raw_db.patients.update_one({"_id": ObjectId(appt["pacjent_id"])},
+                                         {"$set": {"status_recallu": STATUS_DUE, "sekwencja_krok": 0, "zaktualizowano": now}})
+    await raw_db.reminders.insert_one({
+        "clinic_id": appt.get("clinic_id"), "pacjent_id": appt["pacjent_id"], "pacjent_imie": appt.get("pacjent_imie", ""),
+        "typ": "SMS", "rodzaj": "ODPOWIEDZ_PACJENTA", "kierunek": "IN", "odbiorca": "", "tresc": answer,
+        "status": "ODEBRANO", "mock": source != "SMS", "blad": None, "krok_sekwencji": None,
+        "data_wyslania": now, "data_dostarczenia": now,
+    })
+    return {**appt, **upd}
+
+
+class ReplyIn(BaseModel):
+    odpowiedz: str
+
+
+@public_router.get("/appointments/{aid}/public")
+async def appointment_public(aid: str):
+    try:
+        a = await raw_db.appointments.find_one({"_id": ObjectId(aid)})
+    except Exception:
+        a = None
+    if not a:
+        raise HTTPException(404, "Nie znaleziono wizyty")
+    settings = await raw_db.settings.find_one({"clinic_id": a.get("clinic_id")}) or DEFAULT_SETTINGS
+    return {"wizyta": {"id": aid, "pacjent_imie": a.get("pacjent_imie", ""), "data_wizyty": a.get("data_wizyty"),
+                       "status": a.get("status"), "potwierdzona": a.get("potwierdzona"), "procedura": a.get("procedura", "")},
+            "gabinet": _public_settings(settings)}
+
+
+@public_router.post("/appointments/{aid}/respond")
+async def appointment_respond(aid: str, payload: ReplyIn):
+    try:
+        a = await raw_db.appointments.find_one({"_id": ObjectId(aid)})
+    except Exception:
+        a = None
+    if not a:
+        raise HTTPException(404, "Nie znaleziono wizyty")
+    answer = _parse_reply(payload.odpowiedz)
+    if not answer:
+        raise HTTPException(400, "Odpowiedz TAK lub NIE")
+    r = await _apply_reply(a, answer, "LINK")
+    return {"ok": True, "potwierdzona": r["potwierdzona"], "status": r["status"]}
+
+
+@public_router.post("/sms/inbound")
+async def sms_inbound(From: str = Form(default=""), Body: str = Form(default="")):
+    """Twilio-compatible inbound webhook: match sender phone -> nearest planned appointment -> TAK/NIE."""
+    answer = _parse_reply(Body)
+    phone = _normalize_phone(From)
+    if not answer or not phone:
+        return Response(content="<Response></Response>", media_type="application/xml")
+    pattern = r"\D*".join(re.escape(ch) for ch in phone[-6:])
+    async for p in raw_db.patients.find({"telefon": {"$regex": pattern}}):
+        if _normalize_phone(p.get("telefon", "")) != phone:
+            continue
+        a = await raw_db.appointments.find({"pacjent_id": str(p["_id"]), "status": "ZAPLANOWANA",
+                                            "data_wizyty": {"$gte": iso(now_utc() - timedelta(hours=1))}}).sort("data_wizyty", 1).to_list(1)
+        if a:
+            await _apply_reply(a[0], answer, "SMS")
+            break
+    return Response(content="<Response></Response>", media_type="application/xml")
+
+
+@api_router.post("/appointments/{aid}/simulate-reply")
+async def simulate_reply(aid: str, payload: ReplyIn):
+    a = await db.appointments.find_one({"_id": ObjectId(aid)})
+    if not a:
+        raise HTTPException(404, "Nie znaleziono wizyty")
+    answer = _parse_reply(payload.odpowiedz)
+    if not answer:
+        raise HTTPException(400, "Odpowiedz TAK lub NIE")
+    r = await _apply_reply(a, answer, "SYMULACJA")
+    return {"ok": True, "potwierdzona": r["potwierdzona"], "status": r["status"]}
 
 
 # ---------------------------------------------------------------------------
@@ -1076,7 +1189,7 @@ class TestEmailIn(BaseModel):
     do: str
 
 
-@api_router.post("/settings/test-email")
+@api_router.post("/settings/test-email", dependencies=[Depends(auth.require_owner)])
 async def settings_test_email(payload: TestEmailIn):
     settings = await db.settings.find_one({}) or DEFAULT_SETTINGS
     if not EMAIL_RE.match(payload.do.strip()):
@@ -1277,7 +1390,7 @@ async def booking_reject(pid: str):
 # ---------------------------------------------------------------------------
 # Admin: reset demo
 # ---------------------------------------------------------------------------
-@api_router.post("/admin/reset-demo")
+@api_router.post("/admin/reset-demo", dependencies=[Depends(auth.require_owner)])
 async def reset_demo():
     for c in ["patients", "procedures", "settings", "templates", "reminders", "appointments", "slots"]:
         await db[c].delete_many({})
@@ -1285,7 +1398,7 @@ async def reset_demo():
     return {"ok": True}
 
 
-@api_router.post("/admin/load-demo")
+@api_router.post("/admin/load-demo", dependencies=[Depends(auth.require_owner)])
 async def load_demo():
     await seed_if_empty(demo=True)
     return {"ok": True}
@@ -1310,7 +1423,17 @@ async def _migrate_orphans(cid: str):
         set_clinic(None)
 
 
+async def send_system_email(cid: str, to: str, subject: str, text: str, link: str, button: str) -> dict:
+    settings = await raw_db.settings.find_one({"clinic_id": cid}) or DEFAULT_SETTINGS
+    clinic = settings.get("nazwa_gabinetu", "RecallDent")
+    html = _email_html({}, text, link, clinic).replace("Zarezerwuj wizytę</a>", f"{_html_escape(button)}</a>")
+    res = await send_email_reminder(to, subject, html, settings)
+    logging.getLogger(__name__).info("System email to %s: %s (mock=%s) link=%s", to, res.get("status"), res.get("mock"), link)
+    return res
+
+
 auth.init(raw_db, _seed_new_clinic)
+auth.init_mailer(send_system_email)
 app.include_router(auth.router)
 app.include_router(public_router)
 app.include_router(api_router)

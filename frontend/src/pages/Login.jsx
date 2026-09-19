@@ -45,6 +45,9 @@ export default function Login() {
           <Input id="password" type="password" required autoComplete="current-password" data-testid="login-password-input"
             value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
         </div>
+        <div className="text-right -mt-1">
+          <Link to="/nie-pamietam-hasla" data-testid="forgot-password-link" className="text-xs text-primary hover:underline">Nie pamiętam hasła</Link>
+        </div>
         {error && <div data-testid="login-error" className="text-sm text-rose-600 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2">{error}</div>}
         <Button type="submit" disabled={busy} data-testid="login-submit-btn" className="w-full gap-2">
           <LogIn className="h-4 w-4" /> {busy ? "Logowanie..." : "Zaloguj się"}

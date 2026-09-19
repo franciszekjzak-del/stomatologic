@@ -76,6 +76,7 @@ export default function Messages() {
                 <span className="font-medium text-sm">{m.pacjent_imie}</span>
                 <span className="text-xs text-muted-foreground">{m.odbiorca}</span>
                 {m.mock !== false && <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-medium">MOCK</span>}
+                {m.rodzaj === "ODPOWIEDZ_PACJENTA" && <span data-testid="badge-inbound" className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-medium">ODPOWIEDŹ PACJENTA</span>}
                 {m.rodzaj === "PRZYPOMNIENIE_24H" && <span data-testid="badge-24h" className="text-[10px] px-2 py-0.5 rounded-full bg-primary/10 text-primary font-medium">24H PRZED WIZYTĄ</span>}
               </div>
               <p className="text-sm text-muted-foreground whitespace-pre-wrap break-words">{m.tresc}</p>
