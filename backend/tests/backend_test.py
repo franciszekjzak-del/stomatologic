@@ -331,3 +331,182 @@ def test_reset_demo_has_sekwencja_krok(s):
     if reminded:
         assert any("sekwencja_krok" in p for p in reminded)
 
+
+
+# ============================================================
+# Iteration 3 tests: email real (Resend), timeline, slots, booking w/ clinic slots
+# ============================================================
+from datetime import date as _date, timedelta as _td
+
+
+def _future_date(days=3):
+    # server clock ~2026-09-19; use today+days
+    return (_date.today() + _td(days=days)).isoformat()
+
+
+def test_sms_status_email_fields(s):
+    r = s.get(f"{API}/sms-status", timeout=30)
+    assert r.status_code == 200
+    d = r.json()
+    assert d.get("skonfigurowane") is False
+    assert d.get("tryb") == "MOCK"
+    assert d.get("email_skonfigurowane") is True
+    assert d.get("email_tryb") == "REALNY"
+    assert d.get("email_provider") == "Resend"
+
+
+def test_email_dispatch_real_deliverable(s):
+    payload = {"imie": "TESTEMAIL", "nazwisko": "Real", "telefon": "+48 500 000 111",
+               "email": "delivered@resend.dev", "data_ostatniej_wizyty": "2024-01-01",
+               "typ_ostatniej_procedury": "Higienizacja",
+               "zgoda_sms": False, "zgoda_email": True}
+    r = s.post(f"{API}/patients", json=payload, timeout=30)
+    assert r.status_code == 200
+    pid = r.json()["id"]
+    try:
+        r = s.post(f"{API}/patients/{pid}/remind", params={"channel": "EMAIL"}, timeout=60)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        rem = body.get("reminder", body)
+        assert rem.get("typ") == "EMAIL"
+        assert rem.get("mock") is False, f"expected real email, got {rem}"
+        assert rem.get("status") == "WYSLANO", f"status={rem.get('status')}"
+    finally:
+        s.delete(f"{API}/patients/{pid}", timeout=30)
+
+
+def test_email_dispatch_invalid_email_graceful(s):
+    payload = {"imie": "TESTEMAIL", "nazwisko": "Bad", "telefon": "+48 500 000 222",
+               "email": "@example.com", "data_ostatniej_wizyty": "2024-01-01",
+               "typ_ostatniej_procedury": "Higienizacja",
+               "zgoda_sms": False, "zgoda_email": True}
+    r = s.post(f"{API}/patients", json=payload, timeout=30)
+    assert r.status_code == 200
+    pid = r.json()["id"]
+    try:
+        r = s.post(f"{API}/patients/{pid}/remind", params={"channel": "EMAIL"}, timeout=60)
+        # Must NOT 500 - endpoint should return 200 with BLAD status
+        assert r.status_code == 200, r.text
+        body = r.json()
+        rem = body.get("reminder", body)
+        assert rem.get("typ") == "EMAIL"
+        # graceful failure: BLAD, not crash
+        assert rem.get("status") == "BLAD"
+        assert rem.get("mock") is False
+    finally:
+        s.delete(f"{API}/patients/{pid}", timeout=30)
+
+
+def test_timeline_endpoint(s):
+    # create patient, remind SMS (advances step 1) -> then check timeline
+    payload = {"imie": "TIMELINE", "nazwisko": "T", "telefon": "+48 500 300 400",
+               "email": "tl@example.com", "data_ostatniej_wizyty": "2024-01-01",
+               "typ_ostatniej_procedury": "Higienizacja"}
+    r = s.post(f"{API}/patients", json=payload, timeout=30)
+    pid = r.json()["id"]
+    try:
+        s.post(f"{API}/patients/{pid}/remind", params={"channel": "SMS"}, timeout=30)
+        r = s.get(f"{API}/patients/{pid}/timeline", timeout=30)
+        assert r.status_code == 200
+        d = r.json()
+        assert "pacjent" in d
+        assert "sekwencja_krok" in d
+        assert "sekwencja_krok_opis" in d
+        assert isinstance(d.get("przypomnienia"), list) and len(d["przypomnienia"]) >= 1
+        assert isinstance(d.get("wizyty"), list)
+        first = d["przypomnienia"][0]
+        for k in ("typ", "krok_sekwencji", "mock", "status", "data_wyslania"):
+            assert k in first, f"missing {k} in reminder"
+        # next step should be present since patient is now PRZYPOMNIANY at krok 1
+        assert d["sekwencja_krok"] == 1
+        ns = d.get("nastepny_krok")
+        assert ns is not None
+        for k in ("typ", "data", "krok"):
+            assert k in ns
+    finally:
+        s.delete(f"{API}/patients/{pid}", timeout=30)
+
+
+def test_timeline_404(s):
+    r = s.get(f"{API}/patients/000000000000000000000000/timeline", timeout=30)
+    assert r.status_code == 404
+
+
+def test_slots_crud_flow(s):
+    # reset to clear slots
+    s.post(f"{API}/admin/reset-demo", timeout=60)
+    r = s.get(f"{API}/slots", timeout=30)
+    assert r.status_code == 200
+    assert r.json() == []
+
+    d1 = _future_date(3)
+    r = s.post(f"{API}/slots", json={"data": d1, "godziny": ["09:00", "10:00", "11:00"]}, timeout=30)
+    assert r.status_code == 200
+    assert r.json().get("added") == 3
+
+    # duplicate detection
+    r = s.post(f"{API}/slots", json={"data": d1, "godziny": ["09:00", "12:00"]}, timeout=30)
+    assert r.status_code == 200
+    assert r.json().get("added") == 1  # only 12:00 new
+
+    # list sorted
+    r = s.get(f"{API}/slots", timeout=30)
+    assert r.status_code == 200
+    slots = r.json()
+    assert len(slots) == 4
+    godz = [x["godzina"] for x in slots]
+    assert godz == sorted(godz)
+
+    # delete one
+    sid = slots[0]["id"]
+    r = s.delete(f"{API}/slots/{sid}", timeout=30)
+    assert r.status_code == 200
+    r = s.get(f"{API}/slots", timeout=30)
+    assert len(r.json()) == 3
+
+
+def test_booking_uses_clinic_slots(s):
+    s.post(f"{API}/admin/reset-demo", timeout=60)
+    # create patient
+    payload = {"imie": "BOOKCL", "nazwisko": "T", "telefon": "+48 500 400 500",
+               "email": "bc@example.com", "data_ostatniej_wizyty": "2024-01-01",
+               "typ_ostatniej_procedury": "Higienizacja"}
+    r = s.post(f"{API}/patients", json=payload, timeout=30)
+    pid = r.json()["id"]
+    try:
+        # No clinic slots -> auto
+        r = s.get(f"{API}/booking/{pid}", timeout=30)
+        assert r.status_code == 200
+        d = r.json()
+        assert d["reczne_terminy"] is False
+        assert len(d["sloty"]) > 0
+
+        # add clinic slots
+        d1 = _future_date(3)
+        s.post(f"{API}/slots", json={"data": d1, "godziny": ["09:30", "14:00"]}, timeout=30)
+
+        r = s.get(f"{API}/booking/{pid}", timeout=30)
+        d = r.json()
+        assert d["reczne_terminy"] is True
+        assert len(d["sloty"]) == 1
+        assert d["sloty"][0]["data"] == d1
+        assert set(d["sloty"][0]["godziny"]) == {"09:30", "14:00"}
+
+        # confirm booking -> slot zajety
+        r = s.post(f"{API}/booking/{pid}/confirm", json={"data": d1, "godzina": "09:30"}, timeout=30)
+        assert r.status_code == 200
+
+        all_slots = s.get(f"{API}/slots", timeout=30).json()
+        target = [x for x in all_slots if x["data"] == d1 and x["godzina"] == "09:30"]
+        assert target and target[0]["zajety"] is True
+        assert target[0].get("pacjent_id") == pid
+
+        # patient status ZAPISANY
+        pat = [p for p in s.get(f"{API}/patients", timeout=30).json() if p["id"] == pid][0]
+        assert pat["status_recallu"] == "ZAPISANY"
+
+        # confirmation SMS reminder created
+        rems = s.get(f"{API}/reminders", params={"patient_id": pid, "typ": "SMS"}, timeout=30).json()
+        assert any("Potwierdzenie" in (m.get("tresc") or "") for m in rems)
+    finally:
+        s.delete(f"{API}/patients/{pid}", timeout=30)
